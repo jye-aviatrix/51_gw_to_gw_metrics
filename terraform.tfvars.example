@@ -1,0 +1,3 @@
+aviatrix_controller_ip = "controller.example.com"
+aviatrix_username      = "admin"
+aviatrix_password      = "changeme"
