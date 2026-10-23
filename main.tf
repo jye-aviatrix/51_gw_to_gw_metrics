@@ -39,6 +39,10 @@ module "mc-spoke" {
   cidr        = each.value.cidr
   transit_gw  = module.mc-transit[each.value.transit].transit_gateway.gw_name
   insane_mode = true
+
+  # 3 public/private subnet pairs: pair 0 holds the spoke gateways, pairs 1
+  # and 2 host the gw-to-gw test instances (see test_instances.tf).
+  subnet_pairs = 3
 }
 
 # Full mesh peering across all three transits
