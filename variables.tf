@@ -1,21 +1,25 @@
-variable "aviatrix_controller_ip" {
-  description = "Aviatrix Controller public IP or FQDN"
+variable "region" {
+  description = "Azure region for all gateways and VNets"
   type        = string
 }
 
-variable "aviatrix_username" {
+variable "account" {
+  description = "Aviatrix access account name for Azure"
+  type        = string
+}
+
+variable "controller_ip" {
+  description = "Aviatrix Controller IP or FQDN"
+  type        = string
+}
+
+variable "controller_username" {
   description = "Aviatrix Controller username"
   type        = string
 }
 
-variable "aviatrix_password" {
+variable "controller_password" {
   description = "Aviatrix Controller password"
   type        = string
   sensitive   = true
-}
-
-variable "aviatrix_skip_version_validation" {
-  description = "Skip provider/controller version check (needed when provider version != controller version)"
-  type        = bool
-  default     = true
 }
