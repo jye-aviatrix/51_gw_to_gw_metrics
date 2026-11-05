@@ -16,29 +16,31 @@ module "mc-transit" {
   source  = "terraform-aviatrix-modules/mc-transit/aviatrix"
   version = "8.0.0"
 
-  for_each    = local.transits
-  cloud       = "Azure"
-  account     = var.account
-  region      = var.region
-  name        = "${each.key}-vnet"
-  gw_name     = "${each.key}-gw"
-  cidr        = each.value
-  insane_mode = true
+  for_each      = local.transits
+  cloud         = "Azure"
+  account       = var.account
+  region        = var.region
+  name          = "${each.key}-vnet"
+  gw_name       = "${each.key}-gw"
+  cidr          = each.value
+  insane_mode   = true
+  instance_size = "Standard_D2s_v5"
 }
 
 module "mc-spoke" {
   source  = "terraform-aviatrix-modules/mc-spoke/aviatrix"
   version = "8.0.0"
 
-  for_each    = local.spokes
-  cloud       = "Azure"
-  account     = var.account
-  region      = var.region
-  name        = "${each.key}-vnet"
-  gw_name     = "${each.key}-gw"
-  cidr        = each.value.cidr
-  transit_gw  = module.mc-transit[each.value.transit].transit_gateway.gw_name
-  insane_mode = true
+  for_each      = local.spokes
+  cloud         = "Azure"
+  account       = var.account
+  region        = var.region
+  name          = "${each.key}-vnet"
+  gw_name       = "${each.key}-gw"
+  cidr          = each.value.cidr
+  transit_gw    = module.mc-transit[each.value.transit].transit_gateway.gw_name
+  insane_mode   = true
+  instance_size = "Standard_D2s_v5"
 
   # 3 public/private subnet pairs: pair 0 holds the spoke gateways, pairs 1
   # and 2 host the gw-to-gw test instances (see test_instances.tf).
