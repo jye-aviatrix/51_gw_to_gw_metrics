@@ -1,0 +1,79 @@
+name: Export connection metrics
+
+# Runs Export-AviatrixCopilotConnectionMetric against CoPilot and saves the CSV as a build artifact.
+#
+# Setup (Settings > Secrets and variables > Actions):
+#   Secrets:   COPILOT_USER, COPILOT_PASSWORD
+#   Variables: COPILOT_HOST        CoPilot IP or FQDN
+#              TRANSIT_GATEWAYS    comma-separated, e.g. transit1-gw,transit2-gw,transit3-gw
+#
+# The runner must be able to reach CoPilot over HTTPS. GitHub-hosted runners come from public IP
+# ranges, so CoPilot must be reachable from the internet or the job must run on a self-hosted runner
+# (change runs-on).
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: Look-back window in minutes
+        type: number
+        default: 5
+      metric:
+        description: CoPilot metric
+        type: string
+        default: rate_total
+      aggregation:
+        description: Comma-separated Average, Min, Max
+        type: string
+        default: Average,Min,Max
+      connection_type:
+        description: Which connections to export
+        type: choice
+        options: [All, SpokeTransitAttachment, TransitPeering]
+        default: All
+  # Uncomment for a recurring export; each run queries CoPilot (about 150 requests for the lab).
+  # schedule:
+  #   - cron: '0 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: export-connection-metrics
+  cancel-in-progress: false
+
+jobs:
+  export:
+    runs-on: ubuntu-latest   # PowerShell 7 is preinstalled
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Export connection metrics
+        shell: pwsh
+        env:
+          COPILOT_USER: ${{ secrets.COPILOT_USER }}
+          COPILOT_PASSWORD: ${{ secrets.COPILOT_PASSWORD }}
+          COPILOT_HOST: ${{ vars.COPILOT_HOST }}
+          TRANSIT_GATEWAYS: ${{ vars.TRANSIT_GATEWAYS }}
+          MINUTES: ${{ inputs.minutes || 5 }}
+          METRIC: ${{ inputs.metric || 'rate_total' }}
+          AGGREGATION: ${{ inputs.aggregation || 'Average,Min,Max' }}
+          CONNECTION_TYPE: ${{ inputs.connection_type || 'All' }}
+        run: |
+          ./.github/scripts/Export-ConnectionMetrics.ps1 `
+            -ComputerName $env:COPILOT_HOST `
+            -TransitGateway $env:TRANSIT_GATEWAYS `
+            -Metric $env:METRIC `
+            -Aggregation $env:AGGREGATION `
+            -Minutes ([int]$env:MINUTES) `
+            -ConnectionType $env:CONNECTION_TYPE `
+            -OutputPath "$env:RUNNER_TEMP/connection-metrics.csv"
+
+      - name: Upload CSV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: connection-metrics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/connection-metrics.csv
+          if-no-files-found: error
+          retention-days: 30
