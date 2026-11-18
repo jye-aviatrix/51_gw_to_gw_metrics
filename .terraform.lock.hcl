@@ -2,16 +2,16 @@
 # Manual edits may be lost in future updates.
 
 provider "registry.terraform.io/aviatrixsystems/aviatrix" {
-  version     = "8.1.30"
-  constraints = "8.1.30"
+  version     = "10.0.20"
+  constraints = ">= 2.23.0, >= 9.0.0, 10.0.20"
   hashes = [
-    "h1:NSX1m1ZWpC/6RJ3wEThTEM/aUfGYKBSZP8ks/+/fPg4=",
-    "zh:1c8e4a774cb39dda804fd7c5175aafd0831e1cea0ce396c5c2d74d5b08bf59ab",
-    "zh:3e8ffd020c9a3d564d947da63ac4fba5eaa489cb8fd18218bdb6196a5f4c6835",
-    "zh:b47630ed6b9809dca235e470092192b317d69711b02a9b7b99d519f159cd79d1",
-    "zh:dfbbf3fe15e9e16785111e3af565ac4927e3ce0c58df67a6e2f7257bbc1f64f2",
-    "zh:e27edf4fbcc0f063c78bd9e4192618cc9d9bf8fcae9edf2196e3562f9441a0d5",
-    "zh:e5f8614f7ad710d2ea9bb00cc29fc35f343e12def82721d7fd6a6e219c544685",
+    "h1:hd8kCrom8ceKiAwHjMEw8Cyhi1BN5QN6RAQvt+nkXZg=",
+    "zh:62d06ecf3e1960f8afcfe499d17ab37da61faa2eb2bd7a7ef51d1e1dd82f5376",
+    "zh:729d91119b12280c9288bd1cf2803f0a98f7d77cae28fc86b59355c0f45751b6",
+    "zh:7fa384e9cfefbd9a3ae547246b3c1e306cb2ccbe5614c8c9f94c486d7f82de3f",
+    "zh:b8589d25415c19149b9b5505824f4d61e425c33a696486b31bad0654b90ea6fb",
+    "zh:d41a2944ad5d9326e9972277d30419708246371c302750665a4275402a1b0022",
+    "zh:ddaf908a32d75edb41b3349f308507a88cfa993e04c27fccb6f1256a97a4601f",
   ]
 }
 
