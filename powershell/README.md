@@ -17,13 +17,19 @@ against any CoPilot.
 ```powershell
 Import-Module ./powershell/AviatrixCopilot/AviatrixCopilot.psd1
 
-Connect-AviatrixCopilot -ComputerName <copilot> -SkipCertificateCheck
-
-Export-AviatrixCopilotConnectionMetric `
+# One call: connects, exports, logs out
+Export-AviatrixCopilotConnectionMetric -ComputerName <copilot> -SkipCertificateCheck `
     -TransitGateway transit1-gw,transit2-gw,transit3-gw `
     -Metric rate_total -Aggregation Average,Min,Max `
     -TimeRange Last24Hours -Path ./connection-metrics.csv
+```
 
+To run several exports on one login, connect once instead and omit `-ComputerName`:
+
+```powershell
+Connect-AviatrixCopilot -ComputerName <copilot> -SkipCertificateCheck
+Export-AviatrixCopilotConnectionMetric -TransitGateway ... -Metric rate_total -TimeRange Last7Days -Path ./a.csv
+Export-AviatrixCopilotConnectionMetric -TransitGateway ... -Metric rate_total -TimeRange Last24Hours -Path ./b.csv
 Disconnect-AviatrixCopilot
 ```
 
@@ -97,6 +103,7 @@ directions.
 
 | Parameter | Default | Meaning |
 |---|---|---|
+| `-ComputerName`, `-Credential` | none | Connect for this call and log out afterwards. Without `-ComputerName` the export uses your existing session |
 | `-TransitGateway` | required | Transit gateways to start discovery from |
 | `-Metric` | required | CoPilot metric name, for example `rate_total` |
 | `-Path` | required | Output CSV file |

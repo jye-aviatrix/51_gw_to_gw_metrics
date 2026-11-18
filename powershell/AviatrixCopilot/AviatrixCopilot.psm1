@@ -627,9 +627,21 @@ function Export-AviatrixCopilotConnectionMetric {
     .EXAMPLE
         Export-AviatrixCopilotConnectionMetric -TransitGateway transit1-gw,transit2-gw,transit3-gw `
             -Metric rate_total -TimeRange Last24Hours -Path .\rates.csv
+    .EXAMPLE
+        # Connects, exports and logs out in one call
+        Export-AviatrixCopilotConnectionMetric -ComputerName copilot.contoso.com -SkipCertificateCheck `
+            -TransitGateway transit1-gw,transit2-gw,transit3-gw -Metric rate_total `
+            -TimeRange Last24Hours -Path .\rates.csv
     #>
     [CmdletBinding()]
     param(
+        # Connect to this CoPilot for the duration of the call, then log out. Credentials come
+        # from -Credential, else COPILOT_USER / COPILOT_PASSWORD, else a prompt. Omit to use
+        # the session from an earlier Connect-AviatrixCopilot.
+        [string]$ComputerName,
+
+        [PSCredential]$Credential,
+
         [Parameter(Mandatory)]
         [string[]]$TransitGateway,
 
@@ -669,9 +681,21 @@ function Export-AviatrixCopilotConnectionMetric {
         [switch]$SkipCertificateCheck
     )
 
+    if ($ComputerName) {
+        $forward = @{}
+        foreach ($kv in $PSBoundParameters.GetEnumerator()) {
+            if ($kv.Key -notin 'ComputerName', 'Credential') { $forward[$kv.Key] = $kv.Value }
+        }
+        $connect = @{ ComputerName = $ComputerName; SkipCertificateCheck = $SkipCertificateCheck }
+        if ($Credential) { $connect.Credential = $Credential }
+        Connect-AviatrixCopilot @connect | Out-Null
+        try { return Export-AviatrixCopilotConnectionMetric @forward }
+        finally { Disconnect-AviatrixCopilot }
+    }
+
     $session = Get-AviatrixCopilotSession
     if (-not $session) {
-        throw 'Not connected to Aviatrix CoPilot. Run Connect-AviatrixCopilot first.'
+        throw 'Not connected to Aviatrix CoPilot. Pass -ComputerName, or run Connect-AviatrixCopilot first.'
     }
 
     if ($TimeRange) {

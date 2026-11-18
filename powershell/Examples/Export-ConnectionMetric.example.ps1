@@ -27,17 +27,9 @@ $customEnd   = (Get-Date).AddMinutes(-10)
 
 Import-Module "$PSScriptRoot/../AviatrixCopilot/AviatrixCopilot.psd1" -Force
 
-Connect-AviatrixCopilot -ComputerName $copilot -SkipCertificateCheck | Out-Null
+# Named range, or explicit start/end for Custom
+$time = if ($range -eq 'Custom') { @{ Start = $customStart; End = $customEnd } } else { @{ TimeRange = $range } }
 
-$export = @{
-    TransitGateway       = $transits
-    Metric               = $metric
-    Aggregation          = $aggregation
-    Path                 = $csv
-}
-if ($range -eq 'Custom') { $export.Start = $customStart; $export.End = $customEnd }
-else                     { $export.TimeRange = $range }
-
-Export-AviatrixCopilotConnectionMetric @export
-
-Disconnect-AviatrixCopilot
+# Connects, exports, then logs out
+Export-AviatrixCopilotConnectionMetric -ComputerName $copilot -SkipCertificateCheck `
+    -TransitGateway $transits -Metric $metric -Aggregation $aggregation @time -Path $csv
