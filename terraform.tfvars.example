@@ -1,3 +1,15 @@
-aviatrix_controller_ip = "controller.example.com"
-aviatrix_username      = "admin"
-aviatrix_password      = "changeme"
+# Copy to terraform.tfvars (git-ignored) and fill in.
+
+# Required
+region              = "East US"
+account             = "my-azure-access-account"   # Aviatrix Azure access account name
+controller_ip       = "controller.example.com"
+controller_username = "admin"
+controller_password = "changeme"
+
+# Optional (defaults shown)
+# ssh_public_key_path      = "~/.ssh/az-key-pair.pub"
+# test_vm_admin_username   = "azureuser"
+# test_vm_size             = "Standard_B1s"
+# traffic_bandwidth_mbps   = 5
+# traffic_parallel_streams = 5
