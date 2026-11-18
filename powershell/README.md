@@ -108,8 +108,8 @@ directions.
 | `-Metric` | required | CoPilot metric name, for example `rate_total` |
 | `-Path` | required | Output CSV file |
 | `-Aggregation` | `Average` | Any of `Average`, `Min`, `Max` |
-| `-TimeRange` | none | Named range ending now, such as `Last24Hours` |
-| `-Start`, `-End` | now minus 5 minutes, now | Custom time range (not with `-TimeRange`) |
+| `-TimeRange` | none | Named range ending now, such as `Last24Hours`, or `Custom` |
+| `-Start`, `-End` | now minus 5 minutes, now | Range used with `-TimeRange Custom` or when `-TimeRange` is omitted |
 | `-ConnectionType` | `All` | `All`, `SpokeTransitAttachment` or `TransitPeering` |
 | `-Detailed` | off | One row per timestamp instead of one summary row |
 | `-PassThru` | off | Also return the rows as objects |
@@ -129,10 +129,11 @@ Export-AviatrixCopilotConnectionMetric -TransitGateway transit1-gw,transit2-gw,t
 ### Time ranges
 
 `-TimeRange` accepts `Last15Min`, `Last30Min`, `Last60Min`, `Last24Hours`, `Last7Days` or `LastMonth`
-(a rolling month back from now). For anything else, use `-Start` and `-End`, which take any
-`[datetime]`; `-End` defaults to now and `-Start` to 5 minutes before `-End`. Don't combine
-`-TimeRange` with `-Start`/`-End`. `Get-AviatrixCopilotTimeRange -Range <name>` returns the Start and
-End a named range resolves to.
+(a rolling month back from now), or `Custom`. `Custom` uses `-Start` and `-End` (any `[datetime]`, both
+required). For the named ranges `-Start`/`-End` are ignored, so one call can always pass all three. You
+can also leave `-TimeRange` out and pass just `-Start`/`-End`; `-End` defaults to now and `-Start` to 5
+minutes before `-End`. `Get-AviatrixCopilotTimeRange -Range <name>` returns the Start and End a named
+range resolves to.
 
 ```powershell
 $gw = 'transit1-gw','transit2-gw','transit3-gw'
@@ -149,10 +150,10 @@ Export-AviatrixCopilotConnectionMetric @common -TimeRange Last7Days -Path ./last
 Export-AviatrixCopilotConnectionMetric @common -TimeRange LastMonth -Path ./last-month.csv
 
 # Custom range (local time)
-Export-AviatrixCopilotConnectionMetric @common -Start (Get-Date).AddMinutes(-40) -End (Get-Date).AddMinutes(-10) -Path ./custom.csv
+Export-AviatrixCopilotConnectionMetric @common -TimeRange Custom -Start (Get-Date).AddMinutes(-40) -End (Get-Date).AddMinutes(-10) -Path ./custom.csv
 
 # Custom range in UTC
-Export-AviatrixCopilotConnectionMetric @common -Start ([datetime]'2026-11-17T08:00:00Z') -End ([datetime]'2026-11-17T12:30:00Z') -Path ./custom-utc.csv
+Export-AviatrixCopilotConnectionMetric @common -TimeRange Custom -Start ([datetime]'2026-11-17T08:00:00Z') -End ([datetime]'2026-11-17T12:30:00Z') -Path ./custom-utc.csv
 ```
 
 If CoPilot has less data than the range asks for (for example gateways created an hour ago and

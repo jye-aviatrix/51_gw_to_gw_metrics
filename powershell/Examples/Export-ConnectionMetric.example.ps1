@@ -27,9 +27,32 @@ $customEnd   = (Get-Date).AddMinutes(-10)
 
 Import-Module "$PSScriptRoot/../AviatrixCopilot/AviatrixCopilot.psd1" -Force
 
-# Named range, or explicit start/end for Custom
-$time = if ($range -eq 'Custom') { @{ Start = $customStart; End = $customEnd } } else { @{ TimeRange = $range } }
-
 # Connects, exports, then logs out
 Export-AviatrixCopilotConnectionMetric -ComputerName $copilot -SkipCertificateCheck `
-    -TransitGateway $transits -Metric $metric -Aggregation $aggregation @time -Path $csv
+    -TransitGateway $transits -Metric $metric -Aggregation $aggregation `
+    -TimeRange $range -Start $customStart -End $customEnd -Path $csv
+
+# --- Other ways to pick the time range ---------------------------------------
+# Copy one of these in place of the call above. Each connects, exports, logs out.
+#
+# Last 15 minutes:
+#   Export-AviatrixCopilotConnectionMetric -ComputerName $copilot -SkipCertificateCheck `
+#       -TransitGateway $transits -Metric $metric -Aggregation $aggregation `
+#       -TimeRange Last15Min -Path ./last-15min.csv
+#
+# Custom range, relative to now (here 2 hours ago to 1 hour ago, local time):
+#   Export-AviatrixCopilotConnectionMetric -ComputerName $copilot -SkipCertificateCheck `
+#       -TransitGateway $transits -Metric $metric -Aggregation $aggregation `
+#       -TimeRange Custom -Start (Get-Date).AddHours(-2) -End (Get-Date).AddHours(-1) -Path ./custom-relative.csv
+#
+# Custom range, fixed local dates and times:
+#   Export-AviatrixCopilotConnectionMetric -ComputerName $copilot -SkipCertificateCheck `
+#       -TransitGateway $transits -Metric $metric -Aggregation $aggregation `
+#       -TimeRange Custom -Start (Get-Date '2026-11-18 08:00') -End (Get-Date '2026-11-18 12:30') -Path ./custom-local.csv
+#
+# Custom range in UTC (the trailing Z marks the time as UTC):
+#   Export-AviatrixCopilotConnectionMetric -ComputerName $copilot -SkipCertificateCheck `
+#       -TransitGateway $transits -Metric $metric -Aggregation $aggregation `
+#       -TimeRange Custom -Start ([datetime]'2026-11-18T13:00:00Z') -End ([datetime]'2026-11-18T17:30:00Z') -Path ./custom-utc.csv
+#
+# Custom ranges must fall inside the period CoPilot has data for (see $customStart above).

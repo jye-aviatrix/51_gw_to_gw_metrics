@@ -628,6 +628,9 @@ function Export-AviatrixCopilotConnectionMetric {
         Export-AviatrixCopilotConnectionMetric -TransitGateway transit1-gw,transit2-gw,transit3-gw `
             -Metric rate_total -TimeRange Last24Hours -Path .\rates.csv
     .EXAMPLE
+        Export-AviatrixCopilotConnectionMetric -TransitGateway transit1-gw,transit2-gw,transit3-gw `
+            -Metric rate_total -TimeRange Custom -Start (Get-Date).AddHours(-2) -End (Get-Date).AddHours(-1) -Path .\rates.csv
+    .EXAMPLE
         # Connects, exports and logs out in one call
         Export-AviatrixCopilotConnectionMetric -ComputerName copilot.contoso.com -SkipCertificateCheck `
             -TransitGateway transit1-gw,transit2-gw,transit3-gw -Metric rate_total `
@@ -651,8 +654,9 @@ function Export-AviatrixCopilotConnectionMetric {
         [ValidateSet('Average', 'Min', 'Max')]
         [string[]]$Aggregation = 'Average',
 
-        # Named range ending now. For a custom range use -Start/-End instead (not both).
-        [ValidateSet('Last15Min', 'Last30Min', 'Last60Min', 'Last24Hours', 'Last7Days', 'LastMonth')]
+        # Named range ending now, or Custom to use -Start and -End. -Start/-End are ignored for the
+        # named ranges. Omit -TimeRange to use -Start/-End directly (default: the last 5 minutes).
+        [ValidateSet('Last15Min', 'Last30Min', 'Last60Min', 'Last24Hours', 'Last7Days', 'LastMonth', 'Custom')]
         [string]$TimeRange,
 
         [datetime]$End = (Get-Date),
@@ -698,9 +702,14 @@ function Export-AviatrixCopilotConnectionMetric {
         throw 'Not connected to Aviatrix CoPilot. Pass -ComputerName, or run Connect-AviatrixCopilot first.'
     }
 
-    if ($TimeRange) {
+    if ($TimeRange -eq 'Custom') {
+        if (-not ($PSBoundParameters.ContainsKey('Start') -and $PSBoundParameters.ContainsKey('End'))) {
+            throw '-TimeRange Custom requires both -Start and -End.'
+        }
+    }
+    elseif ($TimeRange) {
         if ($PSBoundParameters.ContainsKey('Start') -or $PSBoundParameters.ContainsKey('End')) {
-            throw 'Use either -TimeRange or -Start/-End, not both.'
+            Write-Verbose "-Start/-End ignored: -TimeRange $TimeRange sets the range."
         }
         $r = Get-AviatrixCopilotTimeRange -Range $TimeRange
         $Start = $r.Start; $End = $r.End
