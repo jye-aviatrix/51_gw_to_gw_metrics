@@ -5,7 +5,6 @@ name: Export connection metrics
 # Setup (Settings > Secrets and variables > Actions):
 #   Secrets:   COPILOT_USER, COPILOT_PASSWORD
 #   Variables: COPILOT_HOST        CoPilot IP or FQDN
-#              TRANSIT_GATEWAYS    comma-separated, e.g. transit1-gw,transit2-gw,transit3-gw
 #
 # The runner must be able to reach CoPilot over HTTPS. GitHub-hosted runners come from public IP
 # ranges, so CoPilot must be reachable from the internet or the job must run on a self-hosted runner
@@ -14,10 +13,23 @@ name: Export connection metrics
 on:
   workflow_dispatch:
     inputs:
-      minutes:
-        description: Look-back window in minutes
-        type: number
-        default: 5
+      transit_gateways:
+        description: Comma-separated transit gateways
+        type: string
+        default: transit1-gw,transit2-gw,transit3-gw
+      time_range:
+        description: Time range (Custom uses start and end below)
+        type: choice
+        options: [Last15Min, Last30Min, Last60Min, Last24Hours, Last7Days, LastMonth, Custom]
+        default: Last15Min
+      start:
+        description: Custom start, UTC (for example 2026-11-18T13:00:00Z). Only used when time_range is Custom
+        type: string
+        required: false
+      end:
+        description: Custom end, UTC (for example 2026-11-18T17:30:00Z). Only used when time_range is Custom
+        type: string
+        required: false
       metric:
         description: CoPilot metric
         type: string
@@ -32,6 +44,7 @@ on:
         options: [All, SpokeTransitAttachment, TransitPeering]
         default: All
   # Uncomment for a recurring export; each run queries CoPilot (about 150 requests for the lab).
+  # Scheduled runs have no inputs, so they use the defaults below (the three lab transits, Last15Min, rate_total, all aggregations).
   # schedule:
   #   - cron: '0 * * * *'
 
@@ -55,20 +68,30 @@ jobs:
           COPILOT_USER: ${{ secrets.COPILOT_USER }}
           COPILOT_PASSWORD: ${{ secrets.COPILOT_PASSWORD }}
           COPILOT_HOST: ${{ vars.COPILOT_HOST }}
-          TRANSIT_GATEWAYS: ${{ vars.TRANSIT_GATEWAYS }}
-          MINUTES: ${{ inputs.minutes || 5 }}
+          TRANSIT_GATEWAYS: ${{ inputs.transit_gateways || 'transit1-gw,transit2-gw,transit3-gw' }}
+          TIME_RANGE: ${{ inputs.time_range || 'Last15Min' }}
+          CUSTOM_START: ${{ inputs.start }}
+          CUSTOM_END: ${{ inputs.end }}
           METRIC: ${{ inputs.metric || 'rate_total' }}
           AGGREGATION: ${{ inputs.aggregation || 'Average,Min,Max' }}
           CONNECTION_TYPE: ${{ inputs.connection_type || 'All' }}
         run: |
-          ./.github/scripts/Export-ConnectionMetrics.ps1 `
-            -ComputerName $env:COPILOT_HOST `
-            -TransitGateway $env:TRANSIT_GATEWAYS `
-            -Metric $env:METRIC `
-            -Aggregation $env:AGGREGATION `
-            -Minutes ([int]$env:MINUTES) `
-            -ConnectionType $env:CONNECTION_TYPE `
-            -OutputPath "$env:RUNNER_TEMP/connection-metrics.csv"
+          # Fail fast: without these the module would try to prompt, which a CI job cannot answer.
+          if (-not $env:COPILOT_USER -or -not $env:COPILOT_PASSWORD) { throw 'Secrets COPILOT_USER and COPILOT_PASSWORD must be set.' }
+
+          if ($env:TIME_RANGE -eq 'Custom' -and -not ($env:CUSTOM_START -and $env:CUSTOM_END)) { throw 'time_range Custom needs both start and end.' }
+
+          Import-Module ./powershell/AviatrixCopilot/AviatrixCopilot.psd1 -Force
+
+          # -Start/-End are only used by -TimeRange Custom; the module ignores them for named ranges.
+          $custom = if ($env:TIME_RANGE -eq 'Custom') { @{ Start = [datetime]$env:CUSTOM_START; End = [datetime]$env:CUSTOM_END } } else { @{} }
+
+          $rows = Export-AviatrixCopilotConnectionMetric -ComputerName $env:COPILOT_HOST -SkipCertificateCheck `
+              -TransitGateway ($env:TRANSIT_GATEWAYS.Trim() -split '\s*,\s*') -Metric $env:METRIC `
+              -Aggregation ($env:AGGREGATION.Trim() -split '\s*,\s*') -ConnectionType $env:CONNECTION_TYPE `
+              -TimeRange $env:TIME_RANGE @custom -Path "$env:RUNNER_TEMP/connection-metrics.csv" -PassThru
+
+          $rows | Format-AviatrixCopilotMetricSummary | Add-Content $env:GITHUB_STEP_SUMMARY
 
       - name: Upload CSV artifact
         uses: actions/upload-artifact@v4

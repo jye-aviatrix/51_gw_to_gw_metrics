@@ -168,6 +168,7 @@ Check the `Points` column in the output to see how much data each row covers.
 
 | Command | Purpose |
 |---|---|
+| `Format-AviatrixCopilotMetricSummary -Row` | Markdown table of the summed-tunnel totals from `-PassThru` rows (used for the job summary) |
 | `Get-AviatrixCopilotGatewayInterface -GatewayName -Start -End` | Interfaces with data for a gateway; tunnels (`tun-*`) include `destinationGateway` |
 | `Get-AviatrixCopilotGatewayInterfaceStats -GatewayName -InterfaceName -Metric -AggMethod -Start -End` | Time series for one interface |
 | `Get-AviatrixCopilotGatewayPairTunnelStats -GatewayName -PeerGatewayName -Metric -AggMethod -Start -End` | Time series for every tunnel between two gateways |
@@ -222,13 +223,14 @@ Set up in the repo's *Settings > Secrets and variables > Actions*:
 |---|---|---|
 | Secret | `COPILOT_USER`, `COPILOT_PASSWORD` | CoPilot login |
 | Variable | `COPILOT_HOST` | CoPilot IP or FQDN |
-| Variable | `TRANSIT_GATEWAYS` | Comma-separated, for example `transit1-gw,transit2-gw,transit3-gw` |
 
-Run inputs: look-back minutes, metric, aggregations and connection type. The runner must reach
+Run inputs: transit gateways (comma-separated, default `transit1-gw,transit2-gw,transit3-gw`), time range (`Last15Min` through `LastMonth`, or `Custom` with UTC start and end such as
+`2026-11-18T13:00:00Z`), metric, aggregations and connection type. The runner must reach
 CoPilot over HTTPS: GitHub-hosted runners need CoPilot to be reachable from the internet, otherwise
 change `runs-on` to a self-hosted runner. A commented-out `schedule` trigger is included for recurring
-exports. The job calls [`.github/scripts/Export-ConnectionMetrics.ps1`](../.github/scripts/Export-ConnectionMetrics.ps1),
-which you can also run locally with the same environment variables.
+exports (those runs use the defaults: the three lab transits, `Last15Min`, `rate_total`, all aggregations). The workflow imports
+the module and makes one `Export-AviatrixCopilotConnectionMetric -ComputerName ...` call, so the same
+call works locally.
 
 ## Troubleshooting
 

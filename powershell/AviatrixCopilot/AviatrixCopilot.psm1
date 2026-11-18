@@ -906,4 +906,46 @@ function Export-AviatrixCopilotConnectionMetric {
     if ($PassThru) { $out }
 }
 
-Export-ModuleMember -Function Get-AviatrixCopilotTimeRange, Connect-AviatrixCopilot, Disconnect-AviatrixCopilot, Get-AviatrixCopilotSession, Get-AviatrixCopilotGatewayInterface, Get-AviatrixCopilotGatewayInterfaceStats, Get-AviatrixCopilotGatewayPairTunnelStats, Get-AviatrixCopilotSpokeTransitAttachment, Get-AviatrixCopilotTransitPeering, Export-AviatrixCopilotConnectionMetric
+function Format-AviatrixCopilotMetricSummary {
+    <#
+    .SYNOPSIS
+        Formats exported connection-metric rows as a markdown table, for example for a GitHub job summary.
+    .DESCRIPTION
+        Takes the rows returned by Export-AviatrixCopilotConnectionMetric -PassThru and keeps the ALL
+        (summed-tunnel) rows of the primary gateways, skipping HA (-hagw) gateways. Not for use with
+        -Detailed rows.
+    .EXAMPLE
+        $rows = Export-AviatrixCopilotConnectionMetric ... -PassThru
+        $rows | Format-AviatrixCopilotMetricSummary | Add-Content $env:GITHUB_STEP_SUMMARY
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, ValueFromPipeline)]
+        [object[]]$Row,
+
+        # Defaults to the metric, time range and row count taken from the rows.
+        [string]$Title
+    )
+
+    begin { $all = New-Object System.Collections.Generic.List[object] }
+    process { foreach ($r in $Row) { $all.Add($r) } }
+    end {
+        if ($all.Count -eq 0) { return }
+        if (-not $Title) {
+            $Title = "Connection metrics: $($all[0].Metric) ($($all[0].Start) to $($all[0].End) UTC, $($all.Count) CSV rows)"
+        }
+        $md = New-Object System.Collections.Generic.List[string]
+        $md.Add("### $Title")
+        $md.Add('')
+        $md.Add('| Type | Gateway | Peer | Aggregation | Value |')
+        $md.Add('|---|---|---|---|---:|')
+        foreach ($r in ($all | Where-Object { $_.Tunnel -eq 'ALL' -and $_.Gateway -notlike '*-hagw' -and $_.PeerGateway -notlike '*-hagw' })) {
+            $md.Add(('| {0} | {1} | {2} | {3} | {4:N0} |' -f $r.ConnectionType, $r.Gateway, $r.PeerGateway, $r.Aggregation, [double]$r.Value))
+        }
+        $md.Add('')
+        $md.Add('Totals are the sum of all tunnels for the primary gateways; the full per-tunnel data, including HA gateways, is in the CSV.')
+        $md -join "`n"
+    }
+}
+
+Export-ModuleMember -Function Format-AviatrixCopilotMetricSummary, Get-AviatrixCopilotTimeRange, Connect-AviatrixCopilot, Disconnect-AviatrixCopilot, Get-AviatrixCopilotSession, Get-AviatrixCopilotGatewayInterface, Get-AviatrixCopilotGatewayInterfaceStats, Get-AviatrixCopilotGatewayPairTunnelStats, Get-AviatrixCopilotSpokeTransitAttachment, Get-AviatrixCopilotTransitPeering, Export-AviatrixCopilotConnectionMetric
