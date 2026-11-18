@@ -191,9 +191,12 @@ Check the `Points` column in the output to see how much data each row covers.
   `ALL` row that sums its tunnels at each timestamp before aggregating. On top of that, each direction
   between two gateway *groups* has one `GROUP` row (the example above shows it with the group names in
   `Gateway` and `PeerGateway`) that sums every tunnel between the two groups: the whole primary+HA
-  pair, or all instances of a gateway group. Use the `GROUP` rows for totals. Totals are summed per
-  timestamp, so a timestamp where one tunnel has not reported yet counts fewer tunnels; the sum of the
-  per-tunnel averages can therefore differ slightly from the `GROUP` value.
+  pair, or all instances of a gateway group. Use the `GROUP` rows for totals. `ALL` and `GROUP` totals
+  are summed per timestamp and only use the timestamps at which every tunnel reported: tunnels report
+  on slightly different minute marks, and an incomplete first or last minute would otherwise pull the
+  average down. As a result the `Average` of an `ALL` or `GROUP` row equals the sum of its tunnels'
+  averages when all tunnels report the same minutes. `-Verbose` shows how many timestamps were dropped,
+  and a warning appears if no timestamp had data from every tunnel.
 - **`GatewayGroup` and `PeerGroup`:** the gateway groups of the two sides. For a legacy primary and HA
   pair both gateways are in a group named after the primary (`transit1-gw`); a gateway group created
   with `aviatrix_transit_group` or `aviatrix_spoke_group` has its own name (`transit4`).

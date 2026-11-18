@@ -31,9 +31,9 @@ Still open:
 - `is_hagw` and `ha_enabled` in that response are not reliable (a gateway group reports an arbitrary
   member as the "primary", and `ha_enabled` was `no` everywhere). The module relies on `group_name`
   and `$gw_type` only.
-- `GROUP` totals sum tunnels per timestamp, like the existing `ALL` rows. A timestamp where one tunnel
-  has not reported yet counts fewer tunnels, so the total can be a few percent below the sum of the
-  per-tunnel averages. Consider dropping timestamps where not every tunnel reported.
+- `ALL` and `GROUP` totals only count timestamps at which every tunnel reported. If one tunnel has
+  a long gap or starts late (for example a freshly created tunnel), the total covers only the minutes
+  where all tunnels have data; check `Points` on the row and run with `-Verbose` to see what was dropped.
 - `GET /api/topology` also returns JSON (about 240 KB) and has not been looked at; it may be a better
   source for the whole connection map.
 - Add automated tests (Pester) for the group resolution and edge discovery with canned responses.
