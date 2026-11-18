@@ -14,3 +14,6 @@ terraform.rc
 tfplan
 *.creds.json
 *.creds.psd1
+
+# Exported metrics (gateway names and traffic data)
+*.csv

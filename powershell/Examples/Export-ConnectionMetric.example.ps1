@@ -4,7 +4,7 @@
 # Time ranges, login and logout are handled by the AviatrixCopilot module.
 
 # --- Settings ----------------------------------------------------------------
-$copilot  = 'copilot.example.com'
+$copilot  = 'copilot.example.com'   # CoPilot IP or FQDN
 $transits = 'transit1-gw', 'transit2-gw', 'transit3-gw'
 $csv      = './connection-metrics.csv'
 
