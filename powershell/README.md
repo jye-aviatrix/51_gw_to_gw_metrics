@@ -33,8 +33,9 @@ command that talks to CoPilot, including `Disconnect-AviatrixCopilot`.
 ### Ready-made example
 
 [`Examples/Export-ConnectionMetric.example.ps1`](Examples/Export-ConnectionMetric.example.ps1) does the
-above in about 20 lines. Edit the settings block at the top (CoPilot address, transit names, minutes
-to look back, output file) and run it:
+above in about 20 lines. Edit the settings block at the top (CoPilot address, transit names, time range,
+output file) and run it. `$range` accepts `Last15Min`, `Last30Min`, `Last60Min`, `Last24Hours`,
+`Last7Days`, `LastMonth` or `Custom` (uses `$customStart` / `$customEnd`):
 
 ```powershell
 $env:COPILOT_USER = 'admin'; $env:COPILOT_PASSWORD = '<password>'   # or omit to be prompted
@@ -111,6 +112,39 @@ Export-AviatrixCopilotConnectionMetric -TransitGateway transit1-gw,transit2-gw,t
     -Metric rate_total -Aggregation Average -Detailed -ConnectionType TransitPeering `
     -Start (Get-Date).AddHours(-24) -Path ./peerings-24h.csv -SkipCertificateCheck
 ```
+
+### Time ranges
+
+`-Start` and `-End` take any `[datetime]`; `-End` defaults to now and `-Start` to 5 minutes before `-End`.
+
+```powershell
+$gw = 'transit1-gw','transit2-gw','transit3-gw'
+$common = @{ TransitGateway = $gw; Metric = 'rate_total'; Aggregation = 'Average','Min','Max'; SkipCertificateCheck = $true }
+
+# Last 15 / 30 / 60 minutes
+Export-AviatrixCopilotConnectionMetric @common -Start (Get-Date).AddMinutes(-15) -Path ./last-15m.csv
+Export-AviatrixCopilotConnectionMetric @common -Start (Get-Date).AddMinutes(-30) -Path ./last-30m.csv
+Export-AviatrixCopilotConnectionMetric @common -Start (Get-Date).AddMinutes(-60) -Path ./last-60m.csv
+
+# Last 24 hours, last 7 days, last month
+Export-AviatrixCopilotConnectionMetric @common -Start (Get-Date).AddHours(-24) -Path ./last-24h.csv
+Export-AviatrixCopilotConnectionMetric @common -Start (Get-Date).AddDays(-7)   -Path ./last-7d.csv
+Export-AviatrixCopilotConnectionMetric @common -Start (Get-Date).AddMonths(-1) -Path ./last-month.csv
+
+# Custom range (local time)
+Export-AviatrixCopilotConnectionMetric @common -Start (Get-Date).AddMinutes(-40) -End (Get-Date).AddMinutes(-10) -Path ./custom.csv
+
+# Custom range in UTC
+Export-AviatrixCopilotConnectionMetric @common -Start ([datetime]'2026-11-17T08:00:00Z') -End ([datetime]'2026-11-17T12:30:00Z') -Path ./custom-utc.csv
+```
+
+If CoPilot has less data than the range asks for (for example gateways created an hour ago and
+`-Start` 7 days back), the export still writes the CSV but warns with the actual first and last data
+timestamps. If it has none at all, the error says so. Treat values from a warned run as covering the
+shorter period, not the full range.
+
+Long ranges return more points per tunnel, so they take longer and `-Detailed` CSVs get large.
+Check the `Points` column in the output to see how much data each row covers.
 
 ### Lower-level commands
 

@@ -631,7 +631,12 @@ function Export-AviatrixCopilotConnectionMetric {
     $edges = @(Get-AviatrixCopilotTopologyEdge -TransitGateway $TransitGateway -Start $Start -End $End `
             -InterfaceCache $ifaceCache -SkipCertificateCheck:$SkipCertificateCheck)
     if ($ConnectionType -ne 'All') { $edges = @($edges | Where-Object Type -eq $ConnectionType) }
-    if (-not $edges) { throw 'No connections found for the given transit gateways.' }
+    if (-not $edges) {
+        throw ("No connections found for the given transit gateways between $startUtc and $endUtc (UTC). " +
+            'Check the gateway names. If they are right, CoPilot has no interface data for this time range: ' +
+            'the gateways may have been created or restarted after the range start, or the range is older than CoPilot retains. ' +
+            'Try a more recent range.')
+    }
 
     # 2. Work list: one request per (direction, tunnel, API aggregation).
     $sourceAggs = if ($FetchPerAggregation) { @($Aggregation | ForEach-Object { $apiAgg[$_] } | Select-Object -Unique) } else { @('avg') }
@@ -698,6 +703,41 @@ function Export-AviatrixCopilotConnectionMetric {
         $raw = @($f.Response)[0].($Metric).($w.From).($w.Tunnel)
         $series["$($w.Edge.Type)|$($w.From)|$($w.To)|$($w.Tunnel)|$($w.ApiAgg)"] = @($raw | Where-Object { $null -ne $_ -and $null -ne $_.y } |
                 ForEach-Object { [PSCustomObject]@{ x = $_.x; y = [double]$_.y } })
+    }
+
+    # 4b. Check that the data covers the requested range and warn if it does not.
+    $toUtc = {
+        param($x)
+        if ($x -is [datetime]) {
+            if ($x.Kind -eq 'Local') { $x.ToUniversalTime() } else { [datetime]::SpecifyKind($x, 'Utc') }
+        }
+        else { [datetimeoffset]::Parse([string]$x, [cultureinfo]::InvariantCulture, 'AssumeUniversal').UtcDateTime }
+    }
+    $allTimes = @($series.Values | ForEach-Object { $_ } | ForEach-Object { & $toUtc $_.x })
+    $emptyCount = @($series.Values | Where-Object { @($_).Count -eq 0 }).Count
+    if ($series.Count -gt 0 -and -not $allTimes) {
+        Write-Warning "CoPilot returned no data points for $Metric between $startUtc and $endUtc (UTC); the CSV will have empty values. Check the metric name and the time range."
+    }
+    elseif ($allTimes) {
+        $reqStart = $Start.ToUniversalTime(); $reqEnd = $End.ToUniversalTime()
+        $span = $reqEnd - $reqStart
+        # Allow for CoPilot's 1-minute sampling and edge rounding.
+        $tol = [timespan]::FromMinutes([math]::Max(5, $span.TotalMinutes * 0.05))
+        $first = ($allTimes | Measure-Object -Minimum).Minimum
+        $last = ($allTimes | Measure-Object -Maximum).Maximum
+        $fmt = 'yyyy-MM-dd HH:mm'
+        if ($first - $reqStart -gt $tol) {
+            Write-Warning ("Requested range starts $($reqStart.ToString($fmt)) UTC, but CoPilot's first data point is $($first.ToString($fmt)) UTC. " +
+                "Only $([math]::Round(($reqEnd - $first).TotalMinutes)) of the requested $([math]::Round($span.TotalMinutes)) minutes have data, " +
+                'so the values cover a shorter period than asked. The gateways may be newer than the range start, or data older than this is not retained.')
+        }
+        if ($reqEnd - $last -gt $tol) {
+            Write-Warning ("CoPilot's last data point is $($last.ToString($fmt)) UTC, before the requested end $($reqEnd.ToString($fmt)) UTC. " +
+                'Metrics may have stopped being reported (gateway down or CoPilot collection delayed).')
+        }
+        if ($emptyCount -gt 0) {
+            Write-Warning "$emptyCount of $($series.Count) tunnel series returned no data points in this range."
+        }
     }
 
     # 5. Build rows: per tunnel plus an ALL row (tunnels summed per timestamp), per requested aggregation.
