@@ -435,21 +435,99 @@ function Get-AviatrixCopilotGatewayPairTunnelStats {
 }
 
 # --- Topology discovery -----------------------------------------------------
-# CoPilot has no gateway-list endpoint we can rely on, but every tunnel
-# interface reports its destinationGateway. Starting from the transit
-# gateways you name, that is enough to derive every spoke->transit attachment
-# and transit<->transit peering. HA gateways (<name>-hagw) are queried too and
-# are treated as part of the same logical gateway as their primary.
+# Gateways and their gateway groups come from GET /api/gateways (every gateway has a group_name; a legacy
+# primary and its HA gateway share the primary's name as group). Starting from the transit groups you name,
+# every tunnel interface's destinationGateway then yields each spoke->transit attachment and
+# transit<->transit peering. Tunnels between members of the same group are skipped.
 
-function Get-AviatrixCopilotHaBaseName {
-    param([string]$Name)
-    if ($Name -like '*-hagw') { return $Name.Substring(0, $Name.Length - 5) }
-    return $Name
+function Get-AviatrixCopilotGatewayGroupMap {
+    <#
+    .SYNOPSIS
+        Reads every gateway and its gateway group from CoPilot (GET /api/gateways).
+    .DESCRIPTION
+        CoPilot puts every gateway in a group. A legacy primary gateway and its HA gateway share a group
+        named after the primary (transit1-gw and transit1-gw-hagw are in group transit1-gw). A gateway group
+        created with aviatrix_transit_group / aviatrix_spoke_group holds its instances under the group's own
+        name (transit4-gw1, -gw2 and -gw3 are in group transit4). Returns an object with:
+          Gateways  gateway name -> @{ Name; Group; Type }   (Type is 'transit' or 'spoke')
+          Groups    group name   -> list of member gateway names
+    .EXAMPLE
+        (Get-AviatrixCopilotGatewayGroupMap -SkipCertificateCheck).Groups['transit4']
+    #>
+    [CmdletBinding()]
+    param(
+        [switch]$SkipCertificateCheck
+    )
+
+    $session = Get-AviatrixCopilotSession
+    if (-not $session) {
+        throw 'Not connected to Aviatrix CoPilot. Run Connect-AviatrixCopilot first.'
+    }
+
+    $invokeParams = @{
+        Uri         = "$($session.BaseUri)/api/gateways"
+        Method      = 'Get'
+        WebSession  = $session.WebSession
+        ErrorAction = 'Stop'
+    }
+    $skip = $SkipCertificateCheck -or $session.SkipCertificateCheck
+    foreach ($kv in (Get-AviatrixCopilotSkipCertParams -SkipCertificateCheck:$skip).GetEnumerator()) {
+        $invokeParams[$kv.Key] = $kv.Value
+    }
+
+    try { $response = Invoke-RestMethod @invokeParams }
+    catch { throw "Failed to get Aviatrix CoPilot gateways: $(Get-AviatrixCopilotErrorMessage $_)" }
+
+    $results = @($response.results)
+    if (-not $results -or -not ($results[0].PSObject.Properties.Name -contains 'group_name')) {
+        throw 'CoPilot returned no gateway group information (unexpected /api/gateways response).'
+    }
+
+    $gateways = @{}
+    $groups = @{}
+    foreach ($g in $results) {
+        $name = [string]$g.gw_name
+        if (-not $name) { continue }
+        $group = if ($g.group_name) { [string]$g.group_name } else { $name }
+        $gateways[$name] = [PSCustomObject]@{ Name = $name; Group = $group; Type = [string]$g.'$gw_type' }
+        if (-not $groups.ContainsKey($group)) { $groups[$group] = New-Object System.Collections.Generic.List[string] }
+        $groups[$group].Add($name)
+    }
+    [PSCustomObject]@{ Gateways = $gateways; Groups = $groups }
+}
+
+function Resolve-AviatrixCopilotTransitGroup {
+    # Turns the names given to -TransitGateway into transit gateway groups. A name can be a primary gateway
+    # (resolves to its group, so its HA gateway is included), a member of a gateway group, or the group name.
+    param(
+        [Parameter(Mandatory)] [string[]]$Name,
+        [Parameter(Mandatory)] $Map
+    )
+
+    $resolved = [ordered]@{}
+    foreach ($n in $Name) {
+        $group = if ($Map.Gateways.ContainsKey($n)) { $Map.Gateways[$n].Group }
+        elseif ($Map.Groups.ContainsKey($n)) { $n }
+        else { $null }
+
+        if (-not $group) {
+            $known = @($Map.Groups.Keys | Where-Object { $Map.Gateways[$Map.Groups[$_][0]].Type -eq 'transit' } | Sort-Object)
+            throw "'$n' is not a gateway or gateway group known to CoPilot. Transit groups: $($known -join ', ')."
+        }
+        $type = $Map.Gateways[$Map.Groups[$group][0]].Type
+        if ($type -and $type -ne 'transit') {
+            throw "'$n' is in $type gateway group '$group', not a transit gateway group."
+        }
+        $resolved[$group] = @($Map.Groups[$group])
+    }
+    $resolved
 }
 
 function Get-AviatrixCopilotTopologyEdge {
     [CmdletBinding()]
     param(
+        # Primary transit gateway names (their HA gateways are found automatically) or transit gateway
+        # group names (all their instances are used).
         [Parameter(Mandatory)]
         [string[]]$TransitGateway,
 
@@ -463,15 +541,23 @@ function Get-AviatrixCopilotTopologyEdge {
         # can reuse the listings instead of re-requesting them.
         [hashtable]$InterfaceCache = @{},
 
+        # Result of Get-AviatrixCopilotGatewayGroupMap, so callers can reuse one lookup.
+        $GatewayMap,
+
         [switch]$SkipCertificateCheck
     )
 
-    $transitSet = @{}
-    foreach ($t in $TransitGateway) { $transitSet[$t] = $true }
+    $map = if ($GatewayMap) { $GatewayMap } else { Get-AviatrixCopilotGatewayGroupMap -SkipCertificateCheck:$SkipCertificateCheck }
+
+    # Transit groups to scan: group name -> member gateways.
+    $groups = Resolve-AviatrixCopilotTransitGroup -Name $TransitGateway -Map $map
+    # A tunnel destination CoPilot does not list as a gateway (for example an external connection) is its own group.
+    $groupOf = { param($gw) if ($map.Gateways.ContainsKey($gw)) { $map.Gateways[$gw].Group } else { $gw } }
+    $typeOf = { param($gw) if ($map.Gateways.ContainsKey($gw)) { $map.Gateways[$gw].Type } else { '' } }
 
     $edges = @{}
-    foreach ($transit in $TransitGateway) {
-        foreach ($gw in @($transit, "$transit-hagw")) {
+    foreach ($group in $groups.Keys) {
+        foreach ($gw in $groups[$group]) {
             if ($InterfaceCache.ContainsKey($gw)) {
                 $ifaces = $InterfaceCache[$gw]
             }
@@ -480,8 +566,8 @@ function Get-AviatrixCopilotTopologyEdge {
                     $ifaces = @(Get-AviatrixCopilotGatewayInterface -GatewayName $gw -Start $Start -End $End -SkipCertificateCheck:$SkipCertificateCheck)
                 }
                 catch {
-                    if ($gw -eq $transit) { throw }
-                    continue    # transit has no HA gateway
+                    Write-Warning "No interface data for '$gw' (group '$group'): $($_.Exception.Message)"
+                    continue
                 }
                 $InterfaceCache[$gw] = $ifaces
             }
@@ -489,11 +575,10 @@ function Get-AviatrixCopilotTopologyEdge {
             foreach ($i in $ifaces) {
                 if ($i.interfaceName -notlike 'tun-*' -or -not $i.destinationGateway) { continue }
                 $peer = [string]$i.destinationGateway
-                $gwBase = Get-AviatrixCopilotHaBaseName $gw
-                $peerBase = Get-AviatrixCopilotHaBaseName $peer
-                if ($gwBase -eq $peerBase) { continue }   # primary<->HA link
+                $peerGroup = & $groupOf $peer
+                if ($peerGroup -eq $group) { continue }   # tunnel inside one group (primary<->HA, or group members)
 
-                if ($transitSet.ContainsKey($peerBase)) {
+                if ($groups.Contains($peerGroup) -or (& $typeOf $peer) -eq 'transit') {
                     $type = 'TransitPeering'
                     $pair = @($gw, $peer) | Sort-Object
                     $a = $pair[0]; $b = $pair[1]
@@ -504,12 +589,16 @@ function Get-AviatrixCopilotTopologyEdge {
                 }
                 $key = "$type|$a|$b"
                 if (-not $edges.ContainsKey($key)) {
+                    $groupA = & $groupOf $a
+                    $groupB = & $groupOf $b
                     $edges[$key] = [PSCustomObject]@{
-                        Type      = $type
-                        GatewayA  = $a      # spoke (attachments) or alphabetically first (peerings)
-                        GatewayB  = $b      # transit
-                        SpokeOrA  = Get-AviatrixCopilotHaBaseName $a
-                        TransitOrB = Get-AviatrixCopilotHaBaseName $b
+                        Type       = $type
+                        GatewayA   = $a      # spoke (attachments) or alphabetically first (peerings)
+                        GatewayB   = $b      # transit
+                        GroupA     = $groupA
+                        GroupB     = $groupB
+                        SpokeOrA   = $groupA
+                        TransitOrB = $groupB
                     }
                 }
             }
@@ -522,7 +611,7 @@ function Get-AviatrixCopilotTopologyEdge {
 function Get-AviatrixCopilotSpokeTransitAttachment {
     <#
     .SYNOPSIS
-        Lists spoke->transit attachments (gateway pairs, including HA gateways), derived from tunnel interfaces.
+        Lists spoke->transit attachments (gateway pairs, including HA gateways and gateway group members), derived from tunnel interfaces.
     .EXAMPLE
         Get-AviatrixCopilotSpokeTransitAttachment -TransitGateway transit1-gw,transit2-gw,transit3-gw -SkipCertificateCheck
     #>
@@ -544,6 +633,8 @@ function Get-AviatrixCopilotSpokeTransitAttachment {
             [PSCustomObject]@{
                 SpokeGateway   = $_.GatewayA
                 TransitGateway = $_.GatewayB
+                SpokeGroup     = $_.GroupA
+                TransitGroup   = $_.GroupB
             }
         }
 }
@@ -551,7 +642,7 @@ function Get-AviatrixCopilotSpokeTransitAttachment {
 function Get-AviatrixCopilotTransitPeering {
     <#
     .SYNOPSIS
-        Lists transit<->transit peerings (gateway pairs, including HA gateways), derived from tunnel interfaces.
+        Lists transit<->transit peerings (gateway pairs, including HA gateways and gateway group members), derived from tunnel interfaces.
     .EXAMPLE
         Get-AviatrixCopilotTransitPeering -TransitGateway transit1-gw,transit2-gw,transit3-gw -SkipCertificateCheck
     #>
@@ -573,6 +664,8 @@ function Get-AviatrixCopilotTransitPeering {
             [PSCustomObject]@{
                 TransitGatewayA = $_.GatewayA
                 TransitGatewayB = $_.GatewayB
+                TransitGroupA   = $_.GroupA
+                TransitGroupB   = $_.GroupB
             }
         }
 }
@@ -606,10 +699,17 @@ function Export-AviatrixCopilotConnectionMetric {
     .SYNOPSIS
         Writes a CSV of one metric for every spoke->transit attachment and transit<->transit peering, in both directions.
     .DESCRIPTION
+        -TransitGateway takes either a primary transit gateway name or a transit gateway group name.
+        Both resolve to a CoPilot gateway group: a primary gateway name covers the primary and its HA
+        gateway, a group name covers every instance of the group. A name of any member also works.
+        Mixing both kinds in one call is fine. Spokes are discovered from the tunnels and handled the same way.
+
         Discovers all connections from the given transit gateways, then reads the metric from
         each gateway's own side (A->B and B->A) for the time range. For each requested
         aggregation (Average, Min, Max) one row is written per tunnel plus one 'ALL' row per
-        direction that sums the tunnels at each timestamp before aggregating.
+        direction that sums the tunnels at each timestamp before aggregating. A 'GROUP' row per direction
+        between two gateway groups sums every member-to-member tunnel (the whole primary+HA pair, or all
+        instances of a gateway group). GatewayGroup and PeerGroup columns name the groups.
         Use -Detailed to write one row per timestamp instead of the summary.
 
         Request volume is kept low: each gateway's interface list is fetched once, each tunnel's
@@ -838,7 +938,7 @@ function Export-AviatrixCopilotConnectionMetric {
     # 5. Build rows: per tunnel plus an ALL row (tunnels summed per timestamp), per requested aggregation.
     $out = New-Object System.Collections.Generic.List[object]
     $addRows = {
-        param($edge, $from, $to, $tunnelName, $agg, $points)
+        param($edge, $from, $to, $tunnelName, $agg, $points, $fromGroup, $toGroup)
         $common = [ordered]@{
             ConnectionType = $edge.Type
             Gateway        = $from
@@ -854,6 +954,8 @@ function Export-AviatrixCopilotConnectionMetric {
                 $o = [ordered]@{} + $common
                 $o['Timestamp'] = $p.x
                 $o['Value'] = $p.y
+                $o['GatewayGroup'] = $fromGroup
+                $o['PeerGroup'] = $toGroup
                 $out.Add([PSCustomObject]$o)
             }
             return
@@ -870,12 +972,17 @@ function Export-AviatrixCopilotConnectionMetric {
                 'Max'     { $o['Value'] = $m.Maximum }
             }
         }
+        $o['GatewayGroup'] = $fromGroup
+        $o['PeerGroup'] = $toGroup
         $out.Add([PSCustomObject]$o)
     }
 
+    $groupTotals = [ordered]@{}   # "type|fromGroup|toGroup|agg" -> tunnels summed per timestamp
     foreach ($edge in $edges) {
         foreach ($dir in @(@($edge.GatewayA, $edge.GatewayB), @($edge.GatewayB, $edge.GatewayA))) {
             $from = $dir[0]; $to = $dir[1]
+            $fromGroup = if ($from -eq $edge.GatewayA) { $edge.GroupA } else { $edge.GroupB }
+            $toGroup = if ($to -eq $edge.GatewayA) { $edge.GroupA } else { $edge.GroupB }
             $tunnelNames = @($ifaceCache[$from] | Where-Object { $_.interfaceName -like 'tun-*' -and $_.destinationGateway -eq $to } |
                     ForEach-Object { $_.interfaceName })
             foreach ($agg in $Aggregation) {
@@ -887,18 +994,31 @@ function Export-AviatrixCopilotConnectionMetric {
                     if (-not $series.ContainsKey($key)) { continue }
                     $any = $true
                     $pts = $series[$key]
+                    $gKey = "$($edge.Type)|$fromGroup|$toGroup|$agg"
+                    if (-not $groupTotals.Contains($gKey)) {
+                        $groupTotals[$gKey] = [PSCustomObject]@{ Type = $edge.Type; From = $fromGroup; To = $toGroup; Agg = $agg; PerTime = @{} }
+                    }
                     foreach ($p in $pts) {
                         if (-not $perTime.ContainsKey($p.x)) { $perTime[$p.x] = 0.0 }
                         $perTime[$p.x] += $p.y
+                        if (-not $groupTotals[$gKey].PerTime.ContainsKey($p.x)) { $groupTotals[$gKey].PerTime[$p.x] = 0.0 }
+                        $groupTotals[$gKey].PerTime[$p.x] += $p.y
                     }
-                    & $addRows $edge $from $to $tn $agg $pts
+                    & $addRows $edge $from $to $tn $agg $pts $fromGroup $toGroup
                 }
                 if ($any) {
                     $total = @($perTime.Keys | Sort-Object | ForEach-Object { [PSCustomObject]@{ x = $_; y = $perTime[$_] } })
-                    & $addRows $edge $from $to 'ALL' $agg $total
+                    & $addRows $edge $from $to 'ALL' $agg $total $fromGroup $toGroup
                 }
             }
         }
+    }
+
+    # One 'GROUP' row per direction between two gateway groups: every member-to-member tunnel summed per
+    # timestamp. For a legacy primary+HA pair this is the whole pair; for a gateway group it is all instances.
+    foreach ($gt in $groupTotals.Values) {
+        $total = @($gt.PerTime.Keys | Sort-Object | ForEach-Object { [PSCustomObject]@{ x = $_; y = $gt.PerTime[$_] } })
+        & $addRows ([PSCustomObject]@{ Type = $gt.Type }) $gt.From $gt.To 'GROUP' $gt.Agg $total $gt.From $gt.To
     }
 
     $out | Export-Csv -Path $Path -NoTypeInformation
@@ -911,9 +1031,10 @@ function Format-AviatrixCopilotMetricSummary {
     .SYNOPSIS
         Formats exported connection-metric rows as a markdown table, for example for a GitHub job summary.
     .DESCRIPTION
-        Takes the rows returned by Export-AviatrixCopilotConnectionMetric -PassThru and keeps the ALL
-        (summed-tunnel) rows of the primary gateways, skipping HA (-hagw) gateways. Not for use with
-        -Detailed rows.
+        Takes the rows returned by Export-AviatrixCopilotConnectionMetric -PassThru and writes one table row
+        per gateway group pair and direction, using the 'GROUP' rows (all member-to-member tunnels summed).
+        That covers legacy primary+HA gateways and gateway groups alike. Rows from an older export without
+        GROUP rows fall back to the primary-to-primary 'ALL' rows. Not for use with -Detailed rows.
     .EXAMPLE
         $rows = Export-AviatrixCopilotConnectionMetric ... -PassThru
         $rows | Format-AviatrixCopilotMetricSummary | Add-Content $env:GITHUB_STEP_SUMMARY
@@ -934,18 +1055,29 @@ function Format-AviatrixCopilotMetricSummary {
         if (-not $Title) {
             $Title = "Connection metrics: $($all[0].Metric) ($($all[0].Start) to $($all[0].End) UTC, $($all.Count) CSV rows)"
         }
+        $groupRows = @($all | Where-Object { $_.Tunnel -eq 'GROUP' })
+        if ($groupRows.Count) {
+            $table = $groupRows
+            $header = '| Type | Group | Peer group | Aggregation | Value |'
+            $note = 'Totals sum every tunnel between the two gateway groups (primary and HA gateways, or all gateway group instances); per-tunnel data is in the CSV.'
+        }
+        else {
+            $table = @($all | Where-Object { $_.Tunnel -eq 'ALL' -and $_.Gateway -notlike '*-hagw' -and $_.PeerGateway -notlike '*-hagw' })
+            $header = '| Type | Gateway | Peer | Aggregation | Value |'
+            $note = 'Totals are the sum of all tunnels for the primary gateways; the full per-tunnel data, including HA gateways, is in the CSV.'
+        }
         $md = New-Object System.Collections.Generic.List[string]
         $md.Add("### $Title")
         $md.Add('')
-        $md.Add('| Type | Gateway | Peer | Aggregation | Value |')
+        $md.Add($header)
         $md.Add('|---|---|---|---|---:|')
-        foreach ($r in ($all | Where-Object { $_.Tunnel -eq 'ALL' -and $_.Gateway -notlike '*-hagw' -and $_.PeerGateway -notlike '*-hagw' })) {
+        foreach ($r in $table) {
             $md.Add(('| {0} | {1} | {2} | {3} | {4:N0} |' -f $r.ConnectionType, $r.Gateway, $r.PeerGateway, $r.Aggregation, [double]$r.Value))
         }
         $md.Add('')
-        $md.Add('Totals are the sum of all tunnels for the primary gateways; the full per-tunnel data, including HA gateways, is in the CSV.')
+        $md.Add($note)
         $md -join "`n"
     }
 }
 
-Export-ModuleMember -Function Format-AviatrixCopilotMetricSummary, Get-AviatrixCopilotTimeRange, Connect-AviatrixCopilot, Disconnect-AviatrixCopilot, Get-AviatrixCopilotSession, Get-AviatrixCopilotGatewayInterface, Get-AviatrixCopilotGatewayInterfaceStats, Get-AviatrixCopilotGatewayPairTunnelStats, Get-AviatrixCopilotSpokeTransitAttachment, Get-AviatrixCopilotTransitPeering, Export-AviatrixCopilotConnectionMetric
+Export-ModuleMember -Function Get-AviatrixCopilotGatewayGroupMap, Format-AviatrixCopilotMetricSummary, Get-AviatrixCopilotTimeRange, Connect-AviatrixCopilot, Disconnect-AviatrixCopilot, Get-AviatrixCopilotSession, Get-AviatrixCopilotGatewayInterface, Get-AviatrixCopilotGatewayInterfaceStats, Get-AviatrixCopilotGatewayPairTunnelStats, Get-AviatrixCopilotSpokeTransitAttachment, Get-AviatrixCopilotTransitPeering, Export-AviatrixCopilotConnectionMetric

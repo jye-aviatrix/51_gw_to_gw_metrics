@@ -5,7 +5,8 @@
 
 # --- Settings ----------------------------------------------------------------
 $copilot  = 'copilot.example.com'   # CoPilot IP or FQDN
-$transits = 'transit1-gw', 'transit2-gw', 'transit3-gw'
+# Primary transit gateway names (HA gateways are found automatically) and/or transit gateway group names
+$transits = 'transit1-gw', 'transit2-gw', 'transit3-gw', 'transit4'
 $csv      = './connection-metrics.csv'
 
 # CoPilot metric name, for example rate_total

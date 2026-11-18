@@ -14,9 +14,9 @@ on:
   workflow_dispatch:
     inputs:
       transit_gateways:
-        description: Comma-separated transit gateways
+        description: Comma-separated primary transit gateway names or transit gateway group names
         type: string
-        default: transit1-gw,transit2-gw,transit3-gw
+        default: transit1-gw,transit2-gw,transit3-gw,transit4
       time_range:
         description: Time range (Custom uses start and end below)
         type: choice
@@ -44,7 +44,7 @@ on:
         options: [All, SpokeTransitAttachment, TransitPeering]
         default: All
   # Uncomment for a recurring export; each run queries CoPilot (about 150 requests for the lab).
-  # Scheduled runs have no inputs, so they use the defaults below (the three lab transits, Last15Min, rate_total, all aggregations).
+  # Scheduled runs have no inputs, so they use the defaults below (the four lab transits, Last15Min, rate_total, all aggregations).
   # schedule:
   #   - cron: '0 * * * *'
 
@@ -68,7 +68,7 @@ jobs:
           COPILOT_USER: ${{ secrets.COPILOT_USER }}
           COPILOT_PASSWORD: ${{ secrets.COPILOT_PASSWORD }}
           COPILOT_HOST: ${{ vars.COPILOT_HOST }}
-          TRANSIT_GATEWAYS: ${{ inputs.transit_gateways || 'transit1-gw,transit2-gw,transit3-gw' }}
+          TRANSIT_GATEWAYS: ${{ inputs.transit_gateways || 'transit1-gw,transit2-gw,transit3-gw,transit4' }}
           TIME_RANGE: ${{ inputs.time_range || 'Last15Min' }}
           CUSTOM_START: ${{ inputs.start }}
           CUSTOM_END: ${{ inputs.end }}

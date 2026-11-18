@@ -8,9 +8,10 @@ against any CoPilot.
 
 - PowerShell 5.1+ (7+ recommended)
 - Network access to CoPilot over HTTPS and a local CoPilot user
-- The names of your **transit gateways**. CoPilot has no gateway-list endpoint the module can rely
-  on, so discovery starts from the transits you name and follows each tunnel's destination gateway
-  to find spokes, HA gateways and peerings.
+- The names of your **transit gateways**: either a primary transit gateway name (for example
+  `transit1-gw`) or a transit gateway group name (for example `transit4`). You can mix both.
+  Discovery starts from those transits and follows each tunnel's destination to find spokes and
+  peerings. See [Gateway groups](#gateway-groups-and-ha-gateways).
 
 ## Quick start
 
@@ -70,7 +71,7 @@ Get-AviatrixCopilotSpokeTransitAttachment -TransitGateway transit1-gw,transit2-g
 Get-AviatrixCopilotTransitPeering         -TransitGateway transit1-gw,transit2-gw,transit3-gw -SkipCertificateCheck
 ```
 
-Both list gateway pairs, including HA gateways (`<name>-hagw`). Example output:
+Both list gateway pairs, including HA gateways and gateway group members, and the group each side belongs to. Example output:
 
 ```
 SpokeGateway     TransitGateway
@@ -104,7 +105,7 @@ directions.
 | Parameter | Default | Meaning |
 |---|---|---|
 | `-ComputerName`, `-Credential` | none | Connect for this call and log out afterwards. Without `-ComputerName` the export uses your existing session |
-| `-TransitGateway` | required | Transit gateways to start discovery from |
+| `-TransitGateway` | required | Primary transit gateway names (their HA gateways are found automatically) or transit gateway group names (all instances are used). Any member name also works |
 | `-Metric` | required | CoPilot metric name, for example `rate_total` |
 | `-Path` | required | Output CSV file |
 | `-Aggregation` | `Average` | Any of `Average`, `Min`, `Max` |
@@ -178,21 +179,51 @@ Check the `Points` column in the output to see how much data each row covers.
 ## CSV format
 
 ```
-"ConnectionType","Gateway","PeerGateway","Tunnel","Metric","Aggregation","Start","End","Points","Value"
-"SpokeTransitAttachment","spoke1-gw","transit1-gw","tun-0A000184-0","rate_total","Average","2026-11-04T22:46:30Z","2026-11-04T22:51:30Z","5","5265989.8"
+"ConnectionType","Gateway","PeerGateway","Tunnel","Metric","Aggregation","Start","End","Points","Value","GatewayGroup","PeerGroup"
+"SpokeTransitAttachment","spoke1-gw","transit1-gw","tun-0A000184-0","rate_total","Average","2026-11-04T22:46:30Z","2026-11-04T22:51:30Z","5","5265989.8","spoke1-gw","transit1-gw"
+"SpokeTransitAttachment","spoke1-gw","transit1-gw","ALL","rate_total","Average","2026-11-04T22:46:30Z","2026-11-04T22:51:30Z","5","11594283","spoke1-gw","transit1-gw"
+"SpokeTransitAttachment","spoke1-gw","transit1-gw","GROUP","rate_total","Average","2026-11-04T22:46:30Z","2026-11-04T22:51:30Z","5","146712413","spoke1-gw","transit1-gw"
 ```
 
 - **Both directions:** each connection appears twice, once from each gateway's own side
   (`Gateway` to `PeerGateway`, then the reverse).
-- **Per tunnel and `ALL`:** every direction has one row per tunnel plus an `ALL` row that sums the
-  tunnels at each timestamp before aggregating.
+- **Per tunnel, `ALL` and `GROUP`:** every gateway pair and direction has one row per tunnel plus an
+  `ALL` row that sums its tunnels at each timestamp before aggregating. On top of that, each direction
+  between two gateway *groups* has one `GROUP` row (the example above shows it with the group names in
+  `Gateway` and `PeerGateway`) that sums every tunnel between the two groups: the whole primary+HA
+  pair, or all instances of a gateway group. Use the `GROUP` rows for totals. Totals are summed per
+  timestamp, so a timestamp where one tunnel has not reported yet counts fewer tunnels; the sum of the
+  per-tunnel averages can therefore differ slightly from the `GROUP` value.
+- **`GatewayGroup` and `PeerGroup`:** the gateway groups of the two sides. For a legacy primary and HA
+  pair both gateways are in a group named after the primary (`transit1-gw`); a gateway group created
+  with `aviatrix_transit_group` or `aviatrix_spoke_group` has its own name (`transit4`).
 - **`Value`:** for `Average`, `Min` and `Max` it is the mean, minimum or maximum over the time range
   of CoPilot's 1-minute points. `Points` is how many points that used. With `-Detailed` the columns
   `Timestamp` and `Value` replace `Points` and `Value`, one row per point.
 - **Units:** `rate_total` is reported in bits per second (inferred: one 5 Mbit/s iperf3 flow shows as
   about 5.2 M). Check other metrics before assuming units.
-- **Row count:** 3 transits and 3 spokes with HA gives 24 connections, so 576 rows for three
-  aggregations.
+- **Row count:** one row per tunnel, per `ALL` and per `GROUP`, for each aggregation. Tunnels between
+  members of the same group (primary to HA, or one gateway group instance to another) are not
+  exported.
+
+## Gateway groups and HA gateways
+
+CoPilot puts every gateway in a *gateway group*, and the module reads the groups once per export from
+`GET /api/gateways`:
+
+- A **legacy primary gateway** and its HA gateway share a group named after the primary:
+  `transit1-gw` and `transit1-gw-hagw` are in group `transit1-gw`. Pass `-TransitGateway transit1-gw`
+  and the HA gateway is found automatically. No `-hagw` naming convention is assumed.
+- A **gateway group** created with `aviatrix_transit_group` / `aviatrix_spoke_group` holds its
+  instances under the group's own name: `transit4-gw1`, `-gw2` and `-gw3` are in group `transit4`. Pass
+  `-TransitGateway transit4` and every instance is used.
+
+Either way the export reports the tunnels of all members of each group. Spokes are found from the
+tunnels and are grouped the same way. A tunnel to a transit gateway you did not name is reported as a
+`TransitPeering`, so naming only `transit1-gw` still shows its peerings to the other transits.
+
+`/api/gateways` is undocumented, and the export needs it: if the call fails or returns no group
+information, the export stops with an error instead of guessing gateway names.
 
 ## Request volume and timing
 
@@ -215,7 +246,7 @@ A 5-minute export of the lab (24 connections, 144 tunnel series) takes about 16 
 
 [`.github/workflows/export-connection-metrics.yml`](../.github/workflows/export-connection-metrics.yml)
 runs the export on demand (**Actions > Export connection metrics > Run workflow**) and uploads the CSV
-as a build artifact (kept 30 days). It also writes a job summary table of the primary-gateway totals.
+as a build artifact (kept 30 days). It also writes a job summary table with one row per gateway group pair and direction.
 
 Set up in the repo's *Settings > Secrets and variables > Actions*:
 
@@ -224,11 +255,11 @@ Set up in the repo's *Settings > Secrets and variables > Actions*:
 | Secret | `COPILOT_USER`, `COPILOT_PASSWORD` | CoPilot login |
 | Variable | `COPILOT_HOST` | CoPilot IP or FQDN |
 
-Run inputs: transit gateways (comma-separated, default `transit1-gw,transit2-gw,transit3-gw`), time range (`Last15Min` through `LastMonth`, or `Custom` with UTC start and end such as
+Run inputs: transit gateways (comma-separated primary gateway or group names, default `transit1-gw,transit2-gw,transit3-gw,transit4`), time range (`Last15Min` through `LastMonth`, or `Custom` with UTC start and end such as
 `2026-11-18T13:00:00Z`), metric, aggregations and connection type. The runner must reach
 CoPilot over HTTPS: GitHub-hosted runners need CoPilot to be reachable from the internet, otherwise
 change `runs-on` to a self-hosted runner. A commented-out `schedule` trigger is included for recurring
-exports (those runs use the defaults: the three lab transits, `Last15Min`, `rate_total`, all aggregations). The workflow imports
+exports (those runs use the defaults: the four lab transits, `Last15Min`, `rate_total`, all aggregations). The workflow imports
 the module and makes one `Export-AviatrixCopilotConnectionMetric -ComputerName ...` call, so the same
 call works locally.
 
@@ -238,7 +269,9 @@ call works locally.
 |---|---|
 | `Not connected to Aviatrix CoPilot` | Run `Connect-AviatrixCopilot` first; sessions are per PowerShell session |
 | `No connections found for the given transit gateways` | Names are wrong or have no tunnels in the time range. Check them with `Get-AviatrixCopilotGatewayInterface` |
-| `No tunnels found between 'A' and 'B'` | Same cause for one pair; HA gateway names must match exactly (`<name>-hagw`) |
+| `'x' is not a gateway or gateway group known to CoPilot` | The name is not a gateway or group in CoPilot. The error lists the transit groups it does know |
+| `'x' is in spoke gateway group ...` | `-TransitGateway` takes transit gateways or transit gateway groups, not spokes |
+| `Failed to get Aviatrix CoPilot gateways` or `CoPilot returned no gateway group information` | The export reads gateways and their groups from `/api/gateways`. A network or login error, or a CoPilot version without that endpoint or without `group_name`, stops it. Run `Get-AviatrixCopilotGatewayGroupMap` to see what CoPilot returns |
 | `Must be a valid UTC ISO datetime` | A raw API call used the wrong time format; CoPilot needs `yyyy-MM-ddTHH:mm:ss.fffZ` (the module does this for you) |
 | Passing `-TransitGateway a,b,c` to a script with `pwsh -File` finds nothing | `-File` delivers one string `"a,b,c"`. Set the list inside the script or use `-Command` |
 | Certificate errors | Add `-SkipCertificateCheck` (self-signed CoPilot) |
