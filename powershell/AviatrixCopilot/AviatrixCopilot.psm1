@@ -103,25 +103,68 @@ function ConvertTo-AviatrixCopilotUtcIso8601 {
     $Date.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
 }
 
+function Get-AviatrixCopilotTimeRange {
+    <#
+    .SYNOPSIS
+        Converts a named time range such as Last24Hours into Start and End dates.
+    .DESCRIPTION
+        Ranges end now. LastMonth is a rolling month back from now, not the previous calendar month.
+        For a custom range, pass -Start and -End to the commands directly.
+    .EXAMPLE
+        Get-AviatrixCopilotTimeRange -Range Last7Days
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('Last15Min', 'Last30Min', 'Last60Min', 'Last24Hours', 'Last7Days', 'LastMonth')]
+        [string]$Range
+    )
+
+    $end = Get-Date
+    $start = switch ($Range) {
+        'Last15Min'   { $end.AddMinutes(-15) }
+        'Last30Min'   { $end.AddMinutes(-30) }
+        'Last60Min'   { $end.AddMinutes(-60) }
+        'Last24Hours' { $end.AddHours(-24) }
+        'Last7Days'   { $end.AddDays(-7) }
+        'LastMonth'   { $end.AddMonths(-1) }
+    }
+    [PSCustomObject]@{ Start = $start; End = $end }
+}
+
 function Connect-AviatrixCopilot {
     <#
     .SYNOPSIS
         Logs in to Aviatrix CoPilot with a local user account.
+    .DESCRIPTION
+        If -Credential is omitted, the COPILOT_USER and COPILOT_PASSWORD environment variables
+        are used when both are set; otherwise you are prompted. With -SkipCertificateCheck the
+        session remembers it, so Disconnect-AviatrixCopilot and
+        Export-AviatrixCopilotConnectionMetric do not need the switch again.
     .EXAMPLE
         Connect-AviatrixCopilot -ComputerName copilot.contoso.com -Credential (Get-Credential)
+    .EXAMPLE
+        $env:COPILOT_USER = 'admin'; $env:COPILOT_PASSWORD = '<password>'
+        Connect-AviatrixCopilot -ComputerName copilot.contoso.com -SkipCertificateCheck
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$ComputerName,
 
-        [Parameter(Mandatory)]
         [PSCredential]$Credential,
 
         [int]$Port = 443,
 
         [switch]$SkipCertificateCheck
     )
+
+    if (-not $Credential) {
+        $Credential = if ($env:COPILOT_USER -and $env:COPILOT_PASSWORD) {
+            [PSCredential]::new($env:COPILOT_USER, (ConvertTo-SecureString $env:COPILOT_PASSWORD -AsPlainText -Force))
+        }
+        else { Get-Credential -Message "Aviatrix CoPilot login for $ComputerName" }
+    }
 
     $baseUri = "https://${ComputerName}:${Port}"
     $loginUri = "$baseUri/api/login"
@@ -155,6 +198,7 @@ function Connect-AviatrixCopilot {
         UserName   = $Credential.UserName
         WebSession = $webSession
         LoggedInAt = Get-Date
+        SkipCertificateCheck = [bool]$SkipCertificateCheck
     }
 
     Write-Verbose "Logged in to Aviatrix CoPilot at $baseUri as $($Credential.UserName)."
@@ -176,13 +220,14 @@ function Disconnect-AviatrixCopilot {
         return
     }
 
+    $skipCert = $SkipCertificateCheck -or $Script:AviatrixCopilotSession.SkipCertificateCheck
     $invokeParams = @{
         Uri         = "$($Script:AviatrixCopilotSession.BaseUri)/api/logout"
         Method      = 'Get'
         WebSession  = $Script:AviatrixCopilotSession.WebSession
         ErrorAction = 'Stop'
     }
-    foreach ($kv in (Get-AviatrixCopilotSkipCertParams -SkipCertificateCheck:$SkipCertificateCheck).GetEnumerator()) {
+    foreach ($kv in (Get-AviatrixCopilotSkipCertParams -SkipCertificateCheck:$skipCert).GetEnumerator()) {
         $invokeParams[$kv.Key] = $kv.Value
     }
 
@@ -579,6 +624,9 @@ function Export-AviatrixCopilotConnectionMetric {
     .EXAMPLE
         Export-AviatrixCopilotConnectionMetric -TransitGateway transit1-gw,transit2-gw,transit3-gw `
             -Metric rate_total -Aggregation Average,Min,Max -Path .\rates.csv -SkipCertificateCheck
+    .EXAMPLE
+        Export-AviatrixCopilotConnectionMetric -TransitGateway transit1-gw,transit2-gw,transit3-gw `
+            -Metric rate_total -TimeRange Last24Hours -Path .\rates.csv
     #>
     [CmdletBinding()]
     param(
@@ -590,6 +638,10 @@ function Export-AviatrixCopilotConnectionMetric {
 
         [ValidateSet('Average', 'Min', 'Max')]
         [string[]]$Aggregation = 'Average',
+
+        # Named range ending now. For a custom range use -Start/-End instead (not both).
+        [ValidateSet('Last15Min', 'Last30Min', 'Last60Min', 'Last24Hours', 'Last7Days', 'LastMonth')]
+        [string]$TimeRange,
 
         [datetime]$End = (Get-Date),
 
@@ -621,6 +673,16 @@ function Export-AviatrixCopilotConnectionMetric {
     if (-not $session) {
         throw 'Not connected to Aviatrix CoPilot. Run Connect-AviatrixCopilot first.'
     }
+
+    if ($TimeRange) {
+        if ($PSBoundParameters.ContainsKey('Start') -or $PSBoundParameters.ContainsKey('End')) {
+            throw 'Use either -TimeRange or -Start/-End, not both.'
+        }
+        $r = Get-AviatrixCopilotTimeRange -Range $TimeRange
+        $Start = $r.Start; $End = $r.End
+    }
+    if ($session.SkipCertificateCheck) { $SkipCertificateCheck = [switch]$true }
+    Write-Information "Time range: $Start -> $End" -InformationAction Continue
 
     $apiAgg = @{ Average = 'avg'; Min = 'min'; Max = 'max' }
     $startUtc = $Start.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -811,4 +873,4 @@ function Export-AviatrixCopilotConnectionMetric {
     if ($PassThru) { $out }
 }
 
-Export-ModuleMember -Function Connect-AviatrixCopilot, Disconnect-AviatrixCopilot, Get-AviatrixCopilotSession, Get-AviatrixCopilotGatewayInterface, Get-AviatrixCopilotGatewayInterfaceStats, Get-AviatrixCopilotGatewayPairTunnelStats, Get-AviatrixCopilotSpokeTransitAttachment, Get-AviatrixCopilotTransitPeering, Export-AviatrixCopilotConnectionMetric
+Export-ModuleMember -Function Get-AviatrixCopilotTimeRange, Connect-AviatrixCopilot, Disconnect-AviatrixCopilot, Get-AviatrixCopilotSession, Get-AviatrixCopilotGatewayInterface, Get-AviatrixCopilotGatewayInterfaceStats, Get-AviatrixCopilotGatewayPairTunnelStats, Get-AviatrixCopilotSpokeTransitAttachment, Get-AviatrixCopilotTransitPeering, Export-AviatrixCopilotConnectionMetric

@@ -17,18 +17,23 @@ against any CoPilot.
 ```powershell
 Import-Module ./powershell/AviatrixCopilot/AviatrixCopilot.psd1
 
-Connect-AviatrixCopilot -ComputerName <copilot> -Credential (Get-Credential) -SkipCertificateCheck
+Connect-AviatrixCopilot -ComputerName <copilot> -SkipCertificateCheck
 
 Export-AviatrixCopilotConnectionMetric `
     -TransitGateway transit1-gw,transit2-gw,transit3-gw `
     -Metric rate_total -Aggregation Average,Min,Max `
-    -Start (Get-Date).AddMinutes(-5) -Path ./connection-metrics.csv -SkipCertificateCheck
+    -TimeRange Last24Hours -Path ./connection-metrics.csv
 
-Disconnect-AviatrixCopilot -SkipCertificateCheck
+Disconnect-AviatrixCopilot
 ```
 
-`-SkipCertificateCheck` is needed when CoPilot uses a self-signed certificate. Pass it to every
-command that talks to CoPilot, including `Disconnect-AviatrixCopilot`.
+`Connect-AviatrixCopilot` takes credentials from `-Credential`, else from the `COPILOT_USER` and
+`COPILOT_PASSWORD` environment variables, else it prompts.
+
+`-SkipCertificateCheck` is needed when CoPilot uses a self-signed certificate. Pass it to
+`Connect-AviatrixCopilot` and the session remembers it, so `Export-AviatrixCopilotConnectionMetric` and
+`Disconnect-AviatrixCopilot` don't need it again. The lower-level `Get-AviatrixCopilot*` commands
+still take their own `-SkipCertificateCheck`.
 
 ### Ready-made example
 
@@ -48,7 +53,7 @@ $env:COPILOT_USER = 'admin'; $env:COPILOT_PASSWORD = '<password>'   # or omit to
 
 | Command | Purpose |
 |---|---|
-| `Connect-AviatrixCopilot -ComputerName -Credential [-Port 443] [-SkipCertificateCheck]` | Log in and keep the session for later commands |
+| `Connect-AviatrixCopilot -ComputerName [-Credential] [-Port 443] [-SkipCertificateCheck]` | Log in and keep the session for later commands |
 | `Disconnect-AviatrixCopilot` | Log out and clear the session |
 | `Get-AviatrixCopilotSession` | Show the current session, if any |
 
@@ -96,7 +101,8 @@ directions.
 | `-Metric` | required | CoPilot metric name, for example `rate_total` |
 | `-Path` | required | Output CSV file |
 | `-Aggregation` | `Average` | Any of `Average`, `Min`, `Max` |
-| `-Start`, `-End` | now minus 5 minutes, now | Time range |
+| `-TimeRange` | none | Named range ending now, such as `Last24Hours` |
+| `-Start`, `-End` | now minus 5 minutes, now | Custom time range (not with `-TimeRange`) |
 | `-ConnectionType` | `All` | `All`, `SpokeTransitAttachment` or `TransitPeering` |
 | `-Detailed` | off | One row per timestamp instead of one summary row |
 | `-PassThru` | off | Also return the rows as objects |
@@ -115,21 +121,25 @@ Export-AviatrixCopilotConnectionMetric -TransitGateway transit1-gw,transit2-gw,t
 
 ### Time ranges
 
-`-Start` and `-End` take any `[datetime]`; `-End` defaults to now and `-Start` to 5 minutes before `-End`.
+`-TimeRange` accepts `Last15Min`, `Last30Min`, `Last60Min`, `Last24Hours`, `Last7Days` or `LastMonth`
+(a rolling month back from now). For anything else, use `-Start` and `-End`, which take any
+`[datetime]`; `-End` defaults to now and `-Start` to 5 minutes before `-End`. Don't combine
+`-TimeRange` with `-Start`/`-End`. `Get-AviatrixCopilotTimeRange -Range <name>` returns the Start and
+End a named range resolves to.
 
 ```powershell
 $gw = 'transit1-gw','transit2-gw','transit3-gw'
-$common = @{ TransitGateway = $gw; Metric = 'rate_total'; Aggregation = 'Average','Min','Max'; SkipCertificateCheck = $true }
+$common = @{ TransitGateway = $gw; Metric = 'rate_total'; Aggregation = 'Average','Min','Max' }
 
 # Last 15 / 30 / 60 minutes
-Export-AviatrixCopilotConnectionMetric @common -Start (Get-Date).AddMinutes(-15) -Path ./last-15m.csv
-Export-AviatrixCopilotConnectionMetric @common -Start (Get-Date).AddMinutes(-30) -Path ./last-30m.csv
-Export-AviatrixCopilotConnectionMetric @common -Start (Get-Date).AddMinutes(-60) -Path ./last-60m.csv
+Export-AviatrixCopilotConnectionMetric @common -TimeRange Last15Min -Path ./last-15m.csv
+Export-AviatrixCopilotConnectionMetric @common -TimeRange Last30Min -Path ./last-30m.csv
+Export-AviatrixCopilotConnectionMetric @common -TimeRange Last60Min -Path ./last-60m.csv
 
 # Last 24 hours, last 7 days, last month
-Export-AviatrixCopilotConnectionMetric @common -Start (Get-Date).AddHours(-24) -Path ./last-24h.csv
-Export-AviatrixCopilotConnectionMetric @common -Start (Get-Date).AddDays(-7)   -Path ./last-7d.csv
-Export-AviatrixCopilotConnectionMetric @common -Start (Get-Date).AddMonths(-1) -Path ./last-month.csv
+Export-AviatrixCopilotConnectionMetric @common -TimeRange Last24Hours -Path ./last-24h.csv
+Export-AviatrixCopilotConnectionMetric @common -TimeRange Last7Days -Path ./last-7d.csv
+Export-AviatrixCopilotConnectionMetric @common -TimeRange LastMonth -Path ./last-month.csv
 
 # Custom range (local time)
 Export-AviatrixCopilotConnectionMetric @common -Start (Get-Date).AddMinutes(-40) -End (Get-Date).AddMinutes(-10) -Path ./custom.csv
