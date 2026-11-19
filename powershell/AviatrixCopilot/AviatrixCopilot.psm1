@@ -697,7 +697,7 @@ function Invoke-AviatrixCopilotGet {
 function Export-AviatrixCopilotConnectionMetric {
     <#
     .SYNOPSIS
-        Writes a CSV of one metric for every spoke->transit attachment and transit<->transit peering, in both directions.
+        Writes a CSV of one metric for every tunnel of every spoke->transit attachment and transit<->transit peering, in both directions.
     .DESCRIPTION
         -TransitGateway takes either a primary transit gateway name or a transit gateway group name.
         Both resolve to a CoPilot gateway group: a primary gateway name covers the primary and its HA
@@ -705,26 +705,25 @@ function Export-AviatrixCopilotConnectionMetric {
         Mixing both kinds in one call is fine. Spokes are discovered from the tunnels and handled the same way.
 
         Discovers all connections from the given transit gateways, then reads the metric from
-        each gateway's own side (A->B and B->A) for the time range. For each requested
-        aggregation (Average, Min, Max) one row is written per tunnel plus one 'ALL' row per
-        direction that sums the tunnels at each timestamp before aggregating, counting only the timestamps at
-        which every tunnel reported (see Verbose). A 'GROUP' row per direction
-        between two gateway groups sums every member-to-member tunnel (the whole primary+HA pair, or all
-        instances of a gateway group). GatewayGroup and PeerGroup columns name the groups.
-        Use -Detailed to write one row per timestamp instead of the summary.
+        each gateway's own side (A->B and B->A) for the time range. Every row is exactly one tunnel
+        (seen from one gateway's side): its value over the time range, aggregated with -AggMethod
+        (avg, min, max or sum of CoPilot's points). Nothing is totalled across tunnels; whether and how
+        tunnels can be combined depends on the metric, so that is left to whoever reads the CSV.
+        GatewayGroup and PeerGroup columns name the gateway groups of the two sides to make grouping easy.
+        Use -Detailed to write one row per timestamp instead of one row per tunnel.
 
         Request volume is kept low: each gateway's interface list is fetched once, each tunnel's
-        series is fetched once (Average/Min/Max are computed from the returned points), and
+        series is fetched once (the aggregation is computed from the returned points), and
         requests are sent one at a time by default (-ThrottleLimit raises concurrency on
         PowerShell 7+), with retry/backoff on 429/5xx. CoPilot's stats endpoint accepts one
         interface per request, so one request per tunnel is the minimum.
 
         CoPilot returns identical per-point values for avg/min/max at its 1-minute interval,
-        so deriving Min/Max from one series is equivalent. If that ever stops being true for
-        your metric, use -FetchPerAggregation to request each aggregation from CoPilot separately.
+        so computing the aggregation from one series is equivalent. If that ever stops being true for
+        your metric, use -FetchPerAggregation to ask CoPilot for the chosen -AggMethod instead.
     .EXAMPLE
         Export-AviatrixCopilotConnectionMetric -TransitGateway transit1-gw,transit2-gw,transit3-gw `
-            -Metric rate_total -Aggregation Average,Min,Max -Path .\rates.csv -SkipCertificateCheck
+            -Metric rate_total -AggMethod max -Path .\rates.csv -SkipCertificateCheck
     .EXAMPLE
         Export-AviatrixCopilotConnectionMetric -TransitGateway transit1-gw,transit2-gw,transit3-gw `
             -Metric rate_total -TimeRange Last24Hours -Path .\rates.csv
@@ -752,8 +751,10 @@ function Export-AviatrixCopilotConnectionMetric {
         [Parameter(Mandatory)]
         [string]$Metric,
 
-        [ValidateSet('Average', 'Min', 'Max')]
-        [string[]]$Aggregation = 'Average',
+        # How each tunnel's points over the time range are reduced to one value: avg, min, max or sum.
+        # One method per export; run it again for another.
+        [ValidateSet('avg', 'min', 'max', 'sum')]
+        [string]$AggMethod = 'avg',
 
         # Named range ending now, or Custom to use -Start and -End. -Start/-End are ignored for the
         # named ranges. Omit -TimeRange to use -Start/-End directly (default: the last 5 minutes).
@@ -776,7 +777,7 @@ function Export-AviatrixCopilotConnectionMetric {
         [ValidateRange(1, 16)]
         [int]$ThrottleLimit = 1,
 
-        # Request each aggregation from CoPilot instead of deriving them from one series.
+        # Ask CoPilot for the chosen -AggMethod per point instead of computing it from the avg series.
         [switch]$FetchPerAggregation,
 
         [switch]$Detailed,
@@ -818,7 +819,6 @@ function Export-AviatrixCopilotConnectionMetric {
     if ($session.SkipCertificateCheck) { $SkipCertificateCheck = [switch]$true }
     Write-Information "Time range: $Start -> $End" -InformationAction Continue
 
-    $apiAgg = @{ Average = 'avg'; Min = 'min'; Max = 'max' }
     $startUtc = $Start.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     $endUtc = $End.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 
@@ -834,8 +834,8 @@ function Export-AviatrixCopilotConnectionMetric {
             'Try a more recent range.')
     }
 
-    # 2. Work list: one request per (direction, tunnel, API aggregation).
-    $sourceAggs = if ($FetchPerAggregation) { @($Aggregation | ForEach-Object { $apiAgg[$_] } | Select-Object -Unique) } else { @('avg') }
+    # 2. Work list: one request per (direction, tunnel).
+    $apiAgg = if ($FetchPerAggregation) { $AggMethod } else { 'avg' }
     $work = New-Object System.Collections.Generic.List[object]
     foreach ($edge in $edges) {
         foreach ($dir in @(@($edge.GatewayA, $edge.GatewayB), @($edge.GatewayB, $edge.GatewayA))) {
@@ -849,20 +849,18 @@ function Export-AviatrixCopilotConnectionMetric {
                 continue
             }
             foreach ($tun in $tunnels) {
-                foreach ($a in $sourceAggs) {
-                    $query = @{
-                        gatewayName   = $from
-                        interfaceName = $tun.interfaceName
-                        metric        = $Metric
-                        aggMethod     = $a
-                        start         = ConvertTo-AviatrixCopilotUtcIso8601 $Start
-                        end           = ConvertTo-AviatrixCopilotUtcIso8601 $End
-                    }
-                    $work.Add([PSCustomObject]@{
-                            Edge = $edge; From = $from; To = $to; Tunnel = $tun.interfaceName; ApiAgg = $a
-                            Uri  = "$($session.BaseUri)/api/get_performance_gateway_interface_stats?$(ConvertTo-AviatrixCopilotQueryString $query)"
-                        })
+                $query = @{
+                    gatewayName   = $from
+                    interfaceName = $tun.interfaceName
+                    metric        = $Metric
+                    aggMethod     = $apiAgg
+                    start         = ConvertTo-AviatrixCopilotUtcIso8601 $Start
+                    end           = ConvertTo-AviatrixCopilotUtcIso8601 $End
                 }
+                $work.Add([PSCustomObject]@{
+                        Edge = $edge; From = $from; To = $to; Tunnel = $tun.interfaceName
+                        Uri  = "$($session.BaseUri)/api/get_performance_gateway_interface_stats?$(ConvertTo-AviatrixCopilotQueryString $query)"
+                    })
             }
         }
     }
@@ -891,13 +889,13 @@ function Export-AviatrixCopilotConnectionMetric {
         }
     }
 
-    # 4. Index results by (edge, direction, tunnel, API aggregation).
+    # 4. Index results by (edge, direction, tunnel).
     $series = @{}
     foreach ($f in $fetched) {
         $w = $f.Work
         if ($f.Error) { Write-Warning "$($w.From) -> $($w.To) $($w.Tunnel): $($f.Error)"; continue }
         $raw = @($f.Response)[0].($Metric).($w.From).($w.Tunnel)
-        $series["$($w.Edge.Type)|$($w.From)|$($w.To)|$($w.Tunnel)|$($w.ApiAgg)"] = @($raw | Where-Object { $null -ne $_ -and $null -ne $_.y } |
+        $series["$($w.Edge.Type)|$($w.From)|$($w.To)|$($w.Tunnel)"] = @($raw | Where-Object { $null -ne $_ -and $null -ne $_.y } |
                 ForEach-Object { [PSCustomObject]@{ x = $_.x; y = [double]$_.y } })
     }
 
@@ -936,66 +934,8 @@ function Export-AviatrixCopilotConnectionMetric {
         }
     }
 
-    # 5. Build rows: per tunnel plus an ALL row (tunnels summed per timestamp), per requested aggregation.
+    # 5. One row per tunnel (or per tunnel and timestamp with -Detailed). Nothing is combined across tunnels.
     $out = New-Object System.Collections.Generic.List[object]
-    $addRows = {
-        param($edge, $from, $to, $tunnelName, $agg, $points, $fromGroup, $toGroup)
-        $common = [ordered]@{
-            ConnectionType = $edge.Type
-            Gateway        = $from
-            PeerGateway    = $to
-            Tunnel         = $tunnelName
-            Metric         = $Metric
-            Aggregation    = $agg
-            Start          = $startUtc
-            End            = $endUtc
-        }
-        if ($Detailed) {
-            foreach ($p in $points) {
-                $o = [ordered]@{} + $common
-                $o['Timestamp'] = $p.x
-                $o['Value'] = $p.y
-                $o['GatewayGroup'] = $fromGroup
-                $o['PeerGroup'] = $toGroup
-                $out.Add([PSCustomObject]$o)
-            }
-            return
-        }
-        $vals = @($points | ForEach-Object { $_.y })
-        $o = [ordered]@{} + $common
-        $o['Points'] = $vals.Count
-        $o['Value'] = $null
-        if ($vals.Count) {
-            $m = $vals | Measure-Object -Average -Minimum -Maximum
-            switch ($agg) {
-                'Average' { $o['Value'] = $m.Average }
-                'Min'     { $o['Value'] = $m.Minimum }
-                'Max'     { $o['Value'] = $m.Maximum }
-            }
-        }
-        $o['GatewayGroup'] = $fromGroup
-        $o['PeerGroup'] = $toGroup
-        $out.Add([PSCustomObject]$o)
-    }
-
-    # Sums only the timestamps at which every tunnel reported. Tunnels report on slightly different minute
-    # marks, so the first or last minute often has data from only some of them; averaging that minute in
-    # would pull the total down. If no minute is complete, all minutes are used and a warning says so.
-    $completeTotal = {
-        param($sums, $counts, $expected, $label)
-        $times = @($sums.Keys | Sort-Object)
-        $full = @($times | Where-Object { $counts[$_] -ge $expected })
-        if ($full.Count -eq 0 -and $times.Count -gt 0) {
-            Write-Warning "No timestamp has data from all $expected tunnels for $label; its total uses incomplete minutes."
-            $full = $times
-        }
-        elseif ($full.Count -lt $times.Count) {
-            Write-Verbose "$label : dropped $($times.Count - $full.Count) of $($times.Count) timestamps where fewer than $expected tunnels reported."
-        }
-        @($full | ForEach-Object { [PSCustomObject]@{ x = $_; y = $sums[$_] } })
-    }
-
-    $groupTotals = [ordered]@{}   # "type|fromGroup|toGroup|agg" -> tunnels summed per timestamp
     foreach ($edge in $edges) {
         foreach ($dir in @(@($edge.GatewayA, $edge.GatewayB), @($edge.GatewayB, $edge.GatewayA))) {
             $from = $dir[0]; $to = $dir[1]
@@ -1003,49 +943,49 @@ function Export-AviatrixCopilotConnectionMetric {
             $toGroup = if ($to -eq $edge.GatewayA) { $edge.GroupA } else { $edge.GroupB }
             $tunnelNames = @($ifaceCache[$from] | Where-Object { $_.interfaceName -like 'tun-*' -and $_.destinationGateway -eq $to } |
                     ForEach-Object { $_.interfaceName })
-            foreach ($agg in $Aggregation) {
-                $src = if ($FetchPerAggregation) { $apiAgg[$agg] } else { 'avg' }
-                $perTime = @{}
-                $perCount = @{}
-                $tunnelsWithData = 0
-                $any = $false
-                foreach ($tn in $tunnelNames) {
-                    $key = "$($edge.Type)|$from|$to|$tn|$src"
-                    if (-not $series.ContainsKey($key)) { continue }
-                    $any = $true
-                    $pts = $series[$key]
-                    $gKey = "$($edge.Type)|$fromGroup|$toGroup|$agg"
-                    if (-not $groupTotals.Contains($gKey)) {
-                        $groupTotals[$gKey] = [PSCustomObject]@{ Type = $edge.Type; From = $fromGroup; To = $toGroup; Agg = $agg; PerTime = @{}; PerCount = @{}; Tunnels = 0 }
-                    }
-                    if (@($pts).Count -gt 0) {
-                        $tunnelsWithData++
-                        $groupTotals[$gKey].Tunnels++
-                    }
-                    foreach ($p in $pts) {
-                        if (-not $perTime.ContainsKey($p.x)) { $perTime[$p.x] = 0.0; $perCount[$p.x] = 0 }
-                        $perTime[$p.x] += $p.y
-                        $perCount[$p.x]++
-                        if (-not $groupTotals[$gKey].PerTime.ContainsKey($p.x)) { $groupTotals[$gKey].PerTime[$p.x] = 0.0; $groupTotals[$gKey].PerCount[$p.x] = 0 }
-                        $groupTotals[$gKey].PerTime[$p.x] += $p.y
-                        $groupTotals[$gKey].PerCount[$p.x]++
-                    }
-                    & $addRows $edge $from $to $tn $agg $pts $fromGroup $toGroup
+            foreach ($tn in $tunnelNames) {
+                $key = "$($edge.Type)|$from|$to|$tn"
+                if (-not $series.ContainsKey($key)) { continue }
+                $points = $series[$key]
+                $common = [ordered]@{
+                    ConnectionType = $edge.Type
+                    Gateway        = $from
+                    PeerGateway    = $to
+                    Tunnel         = $tn
+                    Metric         = $Metric
+                    AggMethod      = $AggMethod
+                    Start          = $startUtc
+                    End            = $endUtc
                 }
-                if ($any) {
-                    $total = & $completeTotal $perTime $perCount $tunnelsWithData "$from -> $to ($agg)"
-                    & $addRows $edge $from $to 'ALL' $agg $total $fromGroup $toGroup
+                if ($Detailed) {
+                    foreach ($p in $points) {
+                        $o = [ordered]@{} + $common
+                        $o['Timestamp'] = $p.x
+                        $o['Value'] = $p.y
+                        $o['GatewayGroup'] = $fromGroup
+                        $o['PeerGroup'] = $toGroup
+                        $out.Add([PSCustomObject]$o)
+                    }
+                    continue
                 }
+                $vals = @($points | ForEach-Object { $_.y })
+                $o = [ordered]@{} + $common
+                $o['Points'] = $vals.Count
+                $o['Value'] = $null
+                if ($vals.Count) {
+                    $m = $vals | Measure-Object -Average -Minimum -Maximum -Sum
+                    $o['Value'] = switch ($AggMethod) {
+                        'avg' { $m.Average }
+                        'min' { $m.Minimum }
+                        'max' { $m.Maximum }
+                        'sum' { $m.Sum }
+                    }
+                }
+                $o['GatewayGroup'] = $fromGroup
+                $o['PeerGroup'] = $toGroup
+                $out.Add([PSCustomObject]$o)
             }
         }
-    }
-
-    # One 'GROUP' row per direction between two gateway groups: every member-to-member tunnel summed per
-    # timestamp (only minutes where every tunnel reported). For a legacy primary+HA pair this is the whole pair;
-    # for a gateway group it is all instances.
-    foreach ($gt in $groupTotals.Values) {
-        $total = & $completeTotal $gt.PerTime $gt.PerCount $gt.Tunnels "$($gt.From) -> $($gt.To) ($($gt.Agg))"
-        & $addRows ([PSCustomObject]@{ Type = $gt.Type }) $gt.From $gt.To 'GROUP' $gt.Agg $total $gt.From $gt.To
     }
 
     $out | Export-Csv -Path $Path -NoTypeInformation
@@ -1053,58 +993,4 @@ function Export-AviatrixCopilotConnectionMetric {
     if ($PassThru) { $out }
 }
 
-function Format-AviatrixCopilotMetricSummary {
-    <#
-    .SYNOPSIS
-        Formats exported connection-metric rows as a markdown table, for example for a GitHub job summary.
-    .DESCRIPTION
-        Takes the rows returned by Export-AviatrixCopilotConnectionMetric -PassThru and writes one table row
-        per gateway group pair and direction, using the 'GROUP' rows (all member-to-member tunnels summed).
-        That covers legacy primary+HA gateways and gateway groups alike. Rows from an older export without
-        GROUP rows fall back to the primary-to-primary 'ALL' rows. Not for use with -Detailed rows.
-    .EXAMPLE
-        $rows = Export-AviatrixCopilotConnectionMetric ... -PassThru
-        $rows | Format-AviatrixCopilotMetricSummary | Add-Content $env:GITHUB_STEP_SUMMARY
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory, ValueFromPipeline)]
-        [object[]]$Row,
-
-        # Defaults to the metric, time range and row count taken from the rows.
-        [string]$Title
-    )
-
-    begin { $all = New-Object System.Collections.Generic.List[object] }
-    process { foreach ($r in $Row) { $all.Add($r) } }
-    end {
-        if ($all.Count -eq 0) { return }
-        if (-not $Title) {
-            $Title = "Connection metrics: $($all[0].Metric) ($($all[0].Start) to $($all[0].End) UTC, $($all.Count) CSV rows)"
-        }
-        $groupRows = @($all | Where-Object { $_.Tunnel -eq 'GROUP' })
-        if ($groupRows.Count) {
-            $table = $groupRows
-            $header = '| Type | Group | Peer group | Aggregation | Value |'
-            $note = 'Totals sum every tunnel between the two gateway groups (primary and HA gateways, or all gateway group instances); per-tunnel data is in the CSV.'
-        }
-        else {
-            $table = @($all | Where-Object { $_.Tunnel -eq 'ALL' -and $_.Gateway -notlike '*-hagw' -and $_.PeerGateway -notlike '*-hagw' })
-            $header = '| Type | Gateway | Peer | Aggregation | Value |'
-            $note = 'Totals are the sum of all tunnels for the primary gateways; the full per-tunnel data, including HA gateways, is in the CSV.'
-        }
-        $md = New-Object System.Collections.Generic.List[string]
-        $md.Add("### $Title")
-        $md.Add('')
-        $md.Add($header)
-        $md.Add('|---|---|---|---|---:|')
-        foreach ($r in $table) {
-            $md.Add(('| {0} | {1} | {2} | {3} | {4:N0} |' -f $r.ConnectionType, $r.Gateway, $r.PeerGateway, $r.Aggregation, [double]$r.Value))
-        }
-        $md.Add('')
-        $md.Add($note)
-        $md -join "`n"
-    }
-}
-
-Export-ModuleMember -Function Get-AviatrixCopilotGatewayGroupMap, Format-AviatrixCopilotMetricSummary, Get-AviatrixCopilotTimeRange, Connect-AviatrixCopilot, Disconnect-AviatrixCopilot, Get-AviatrixCopilotSession, Get-AviatrixCopilotGatewayInterface, Get-AviatrixCopilotGatewayInterfaceStats, Get-AviatrixCopilotGatewayPairTunnelStats, Get-AviatrixCopilotSpokeTransitAttachment, Get-AviatrixCopilotTransitPeering, Export-AviatrixCopilotConnectionMetric
+Export-ModuleMember -Function Get-AviatrixCopilotGatewayGroupMap, Get-AviatrixCopilotTimeRange, Connect-AviatrixCopilot, Disconnect-AviatrixCopilot, Get-AviatrixCopilotSession, Get-AviatrixCopilotGatewayInterface, Get-AviatrixCopilotGatewayInterfaceStats, Get-AviatrixCopilotGatewayPairTunnelStats, Get-AviatrixCopilotSpokeTransitAttachment, Get-AviatrixCopilotTransitPeering, Export-AviatrixCopilotConnectionMetric

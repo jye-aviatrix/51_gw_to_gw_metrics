@@ -21,7 +21,7 @@ Import-Module ./powershell/AviatrixCopilot/AviatrixCopilot.psd1
 # One call: connects, exports, logs out
 Export-AviatrixCopilotConnectionMetric -ComputerName <copilot> -SkipCertificateCheck `
     -TransitGateway transit1-gw,transit2-gw,transit3-gw `
-    -Metric rate_total -Aggregation Average,Min,Max `
+    -Metric rate_total -AggMethod avg `
     -TimeRange Last24Hours -Path ./connection-metrics.csv
 ```
 
@@ -108,14 +108,14 @@ directions.
 | `-TransitGateway` | required | Primary transit gateway names (their HA gateways are found automatically) or transit gateway group names (all instances are used). Any member name also works |
 | `-Metric` | required | CoPilot metric name, for example `rate_total` |
 | `-Path` | required | Output CSV file |
-| `-Aggregation` | `Average` | Any of `Average`, `Min`, `Max` |
+| `-AggMethod` | `avg` | One of `avg`, `min`, `max`, `sum`: how each tunnel's points over the time range are reduced to one value. One method per export |
 | `-TimeRange` | none | Named range ending now, such as `Last24Hours`, or `Custom` |
 | `-Start`, `-End` | now minus 5 minutes, now | Range used with `-TimeRange Custom` or when `-TimeRange` is omitted |
 | `-ConnectionType` | `All` | `All`, `SpokeTransitAttachment` or `TransitPeering` |
-| `-Detailed` | off | One row per timestamp instead of one summary row |
+| `-Detailed` | off | One row per tunnel and timestamp instead of one row per tunnel |
 | `-PassThru` | off | Also return the rows as objects |
 | `-ThrottleLimit` | `1` | Concurrent requests (PowerShell 7+, max 16). See below |
-| `-FetchPerAggregation` | off | Request each aggregation from CoPilot separately |
+| `-FetchPerAggregation` | off | Ask CoPilot for the chosen `-AggMethod` per point instead of computing it from the avg series |
 | `-SkipCertificateCheck` | off | Skip TLS certificate validation |
 
 More examples:
@@ -123,7 +123,7 @@ More examples:
 ```powershell
 # 24 hours of per-timestamp averages, peerings only
 Export-AviatrixCopilotConnectionMetric -TransitGateway transit1-gw,transit2-gw,transit3-gw `
-    -Metric rate_total -Aggregation Average -Detailed -ConnectionType TransitPeering `
+    -Metric rate_total -AggMethod avg -Detailed -ConnectionType TransitPeering `
     -Start (Get-Date).AddHours(-24) -Path ./peerings-24h.csv -SkipCertificateCheck
 ```
 
@@ -138,7 +138,7 @@ range resolves to.
 
 ```powershell
 $gw = 'transit1-gw','transit2-gw','transit3-gw'
-$common = @{ TransitGateway = $gw; Metric = 'rate_total'; Aggregation = 'Average','Min','Max' }
+$common = @{ TransitGateway = $gw; Metric = 'rate_total'; AggMethod = 'max' }
 
 # Last 15 / 30 / 60 minutes
 Export-AviatrixCopilotConnectionMetric @common -TimeRange Last15Min -Path ./last-15m.csv
@@ -169,7 +169,6 @@ Check the `Points` column in the output to see how much data each row covers.
 
 | Command | Purpose |
 |---|---|
-| `Format-AviatrixCopilotMetricSummary -Row` | Markdown table of the summed-tunnel totals from `-PassThru` rows (used for the job summary) |
 | `Get-AviatrixCopilotGatewayInterface -GatewayName -Start -End` | Interfaces with data for a gateway; tunnels (`tun-*`) include `destinationGateway` |
 | `Get-AviatrixCopilotGatewayInterfaceStats -GatewayName -InterfaceName -Metric -AggMethod -Start -End` | Time series for one interface |
 | `Get-AviatrixCopilotGatewayPairTunnelStats -GatewayName -PeerGatewayName -Metric -AggMethod -Start -End` | Time series for every tunnel between two gateways |
@@ -179,35 +178,30 @@ Check the `Points` column in the output to see how much data each row covers.
 ## CSV format
 
 ```
-"ConnectionType","Gateway","PeerGateway","Tunnel","Metric","Aggregation","Start","End","Points","Value","GatewayGroup","PeerGroup"
-"SpokeTransitAttachment","spoke1-gw","transit1-gw","tun-0A000184-0","rate_total","Average","2026-11-04T22:46:30Z","2026-11-04T22:51:30Z","5","5265989.8","spoke1-gw","transit1-gw"
-"SpokeTransitAttachment","spoke1-gw","transit1-gw","ALL","rate_total","Average","2026-11-04T22:46:30Z","2026-11-04T22:51:30Z","5","11594283","spoke1-gw","transit1-gw"
-"SpokeTransitAttachment","spoke1-gw","transit1-gw","GROUP","rate_total","Average","2026-11-04T22:46:30Z","2026-11-04T22:51:30Z","5","146712413","spoke1-gw","transit1-gw"
+"ConnectionType","Gateway","PeerGateway","Tunnel","Metric","AggMethod","Start","End","Points","Value","GatewayGroup","PeerGroup"
+"SpokeTransitAttachment","spoke1-gw","transit1-gw","tun-0A000184-0","rate_total","avg","2026-11-04T22:46:30Z","2026-11-04T22:51:30Z","5","5265989.8","spoke1-gw","transit1-gw"
+"SpokeTransitAttachment","spoke1-gw","transit1-gw","tun-0A000185-0","rate_total","avg","2026-11-04T22:46:30Z","2026-11-04T22:51:30Z","5","10484360.6","spoke1-gw","transit1-gw"
 ```
 
+- **One row per tunnel.** Nothing is combined across tunnels: whether tunnels can be added up, averaged
+  or compared depends on the metric (rates add up, latency does not), so grouping is left to you.
+  Use `Gateway`, `PeerGateway`, `GatewayGroup` and `PeerGroup` to group the rows.
 - **Both directions:** each connection appears twice, once from each gateway's own side
-  (`Gateway` to `PeerGateway`, then the reverse).
-- **Per tunnel, `ALL` and `GROUP`:** every gateway pair and direction has one row per tunnel plus an
-  `ALL` row that sums its tunnels at each timestamp before aggregating. On top of that, each direction
-  between two gateway *groups* has one `GROUP` row (the example above shows it with the group names in
-  `Gateway` and `PeerGateway`) that sums every tunnel between the two groups: the whole primary+HA
-  pair, or all instances of a gateway group. Use the `GROUP` rows for totals. `ALL` and `GROUP` totals
-  are summed per timestamp and only use the timestamps at which every tunnel reported: tunnels report
-  on slightly different minute marks, and an incomplete first or last minute would otherwise pull the
-  average down. As a result the `Average` of an `ALL` or `GROUP` row equals the sum of its tunnels'
-  averages when all tunnels report the same minutes. `-Verbose` shows how many timestamps were dropped,
-  and a warning appears if no timestamp had data from every tunnel.
+  (`Gateway` to `PeerGateway`, then the reverse). A tunnel therefore appears in both directions.
 - **`GatewayGroup` and `PeerGroup`:** the gateway groups of the two sides. For a legacy primary and HA
   pair both gateways are in a group named after the primary (`transit1-gw`); a gateway group created
   with `aviatrix_transit_group` or `aviatrix_spoke_group` has its own name (`transit4`).
-- **`Value`:** for `Average`, `Min` and `Max` it is the mean, minimum or maximum over the time range
-  of CoPilot's 1-minute points. `Points` is how many points that used. With `-Detailed` the columns
-  `Timestamp` and `Value` replace `Points` and `Value`, one row per point.
+- **`Value`:** the tunnel's value over the time range, reduced with `AggMethod`: the mean (`avg`), the
+  minimum (`min`), the maximum (`max`) or the sum (`sum`) of CoPilot's points. `Points` is how many
+  points that used. With `-Detailed` the columns `Timestamp` and `Value` replace `Points` and `Value`,
+  one row per point.
 - **Units:** `rate_total` is reported in bits per second (inferred: one 5 Mbit/s iperf3 flow shows as
   about 5.2 M). Check other metrics before assuming units.
-- **Row count:** one row per tunnel, per `ALL` and per `GROUP`, for each aggregation. Tunnels between
-  members of the same group (primary to HA, or one gateway group instance to another) are not
-  exported.
+- **Row count:** one row per tunnel and direction. Tunnels between members of the same group (primary
+  to HA, or one gateway group instance to another) are not exported.
+- **Combining tunnels yourself:** to total a rate such as `rate_total`, sum `Value` over the tunnels of
+  a group pair and direction, and use one export with `-AggMethod avg`, or with `-Detailed` if you
+  need totals per minute. Tunnels report on slightly different minute marks, so check `Points` first.
 
 ## Gateway groups and HA gateways
 
@@ -233,9 +227,9 @@ information, the export stops with an error instead of guessing gateway names.
 The export is designed not to hammer CoPilot:
 
 - Each gateway's interface list is fetched once and reused.
-- Each tunnel's series is fetched **once**; Average, Min and Max are computed from it. At CoPilot's
+- Each tunnel's series is fetched **once**, and the chosen `-AggMethod` is computed from it. At CoPilot's
   1-minute interval the avg, min and max series were identical for `rate_total`, so this gives the
-  same CSV as three separate requests. If that is not true for your metric, add
+  same CSV as asking CoPilot for that method. If that is not true for your metric, add
   `-FetchPerAggregation`.
 - CoPilot's stats endpoint takes one interface per request, so one request per tunnel is the minimum.
 - Requests run one at a time by default, with retry and backoff (2 s, then 4 s) on throttling (429),
@@ -249,7 +243,7 @@ A 5-minute export of the lab (24 connections, 144 tunnel series) takes about 16 
 
 [`.github/workflows/export-connection-metrics.yml`](../.github/workflows/export-connection-metrics.yml)
 runs the export on demand (**Actions > Export connection metrics > Run workflow**) and uploads the CSV
-as a build artifact (kept 30 days). It also writes a job summary table with one row per gateway group pair and direction.
+as a build artifact (kept 30 days). The job summary only states how many tunnel rows were exported.
 
 Set up in the repo's *Settings > Secrets and variables > Actions*:
 
@@ -259,10 +253,10 @@ Set up in the repo's *Settings > Secrets and variables > Actions*:
 | Variable | `COPILOT_HOST` | CoPilot IP or FQDN |
 
 Run inputs: transit gateways (comma-separated primary gateway or group names, default `transit1-gw,transit2-gw,transit3-gw,transit4`), time range (`Last15Min` through `LastMonth`, or `Custom` with UTC start and end such as
-`2026-11-18T13:00:00Z`), metric, aggregations and connection type. The runner must reach
+`2026-11-18T13:00:00Z`), metric, aggregation method (`avg`, `min`, `max` or `sum`) and connection type. The runner must reach
 CoPilot over HTTPS: GitHub-hosted runners need CoPilot to be reachable from the internet, otherwise
 change `runs-on` to a self-hosted runner. A commented-out `schedule` trigger is included for recurring
-exports (those runs use the defaults: the four lab transits, `Last15Min`, `rate_total`, all aggregations). The workflow imports
+exports (those runs use the defaults: the four lab transits, `Last15Min`, `rate_total`, `avg`). The workflow imports
 the module and makes one `Export-AviatrixCopilotConnectionMetric -ComputerName ...` call, so the same
 call works locally.
 

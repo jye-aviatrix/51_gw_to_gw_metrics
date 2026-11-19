@@ -17,7 +17,9 @@ that supports `get_gateway_group_details_by_name`:
 Done: `-TransitGateway` takes a primary transit gateway name or a transit gateway group name. Both
 resolve to a CoPilot gateway group (`GET /api/gateways`, field `group_name`), so primary + HA gateways
 and gateway group instances are discovered without assuming a `-hagw` suffix. Tunnels inside one group
-are skipped, and the CSV has `GatewayGroup` / `PeerGroup` columns plus `GROUP` total rows.
+are skipped, and the CSV has `GatewayGroup` / `PeerGroup` columns. Every CSV row is one tunnel and there
+is one `-AggMethod` per export; totals across tunnels are left to the reader because they depend on the
+metric (rates add up, latency does not).
 
 Still open:
 
@@ -31,9 +33,9 @@ Still open:
 - `is_hagw` and `ha_enabled` in that response are not reliable (a gateway group reports an arbitrary
   member as the "primary", and `ha_enabled` was `no` everywhere). The module relies on `group_name`
   and `$gw_type` only.
-- `ALL` and `GROUP` totals only count timestamps at which every tunnel reported. If one tunnel has
-  a long gap or starts late (for example a freshly created tunnel), the total covers only the minutes
-  where all tunnels have data; check `Points` on the row and run with `-Verbose` to see what was dropped.
 - `GET /api/topology` also returns JSON (about 240 KB) and has not been looked at; it may be a better
   source for the whole connection map.
 - Add automated tests (Pester) for the group resolution and edge discovery with canned responses.
+- If totals are wanted again, add a metric catalog (`Sum` / `Mean` / `Max` / `Min` / `None` per metric) with
+  a `-Combine` override, compute them over one shared set of minutes per group pair, and never total a
+  metric the catalog does not know.

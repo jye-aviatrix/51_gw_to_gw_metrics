@@ -34,17 +34,18 @@ on:
         description: CoPilot metric
         type: string
         default: rate_total
-      aggregation:
-        description: Comma-separated Average, Min, Max
-        type: string
-        default: Average,Min,Max
+      agg_method:
+        description: How each tunnel's points over the time range are reduced to one value
+        type: choice
+        options: [avg, min, max, sum]
+        default: avg
       connection_type:
         description: Which connections to export
         type: choice
         options: [All, SpokeTransitAttachment, TransitPeering]
         default: All
   # Uncomment for a recurring export; each run queries CoPilot (about 150 requests for the lab).
-  # Scheduled runs have no inputs, so they use the defaults below (the four lab transits, Last15Min, rate_total, all aggregations).
+  # Scheduled runs have no inputs, so they use the defaults below (the four lab transits, Last15Min, rate_total, avg).
   # schedule:
   #   - cron: '0 * * * *'
 
@@ -73,7 +74,7 @@ jobs:
           CUSTOM_START: ${{ inputs.start }}
           CUSTOM_END: ${{ inputs.end }}
           METRIC: ${{ inputs.metric || 'rate_total' }}
-          AGGREGATION: ${{ inputs.aggregation || 'Average,Min,Max' }}
+          AGG_METHOD: ${{ inputs.agg_method || 'avg' }}
           CONNECTION_TYPE: ${{ inputs.connection_type || 'All' }}
         run: |
           # Fail fast: without these the module would try to prompt, which a CI job cannot answer.
@@ -88,10 +89,11 @@ jobs:
 
           $rows = Export-AviatrixCopilotConnectionMetric -ComputerName $env:COPILOT_HOST -SkipCertificateCheck `
               -TransitGateway ($env:TRANSIT_GATEWAYS.Trim() -split '\s*,\s*') -Metric $env:METRIC `
-              -Aggregation ($env:AGGREGATION.Trim() -split '\s*,\s*') -ConnectionType $env:CONNECTION_TYPE `
+              -AggMethod $env:AGG_METHOD -ConnectionType $env:CONNECTION_TYPE `
               -TimeRange $env:TIME_RANGE @custom -Path "$env:RUNNER_TEMP/connection-metrics.csv" -PassThru
 
-          $rows | Format-AviatrixCopilotMetricSummary | Add-Content $env:GITHUB_STEP_SUMMARY
+          # One row per tunnel; combining tunnels depends on the metric, so the job summary only counts them.
+          "### Connection metrics: $env:METRIC ($env:AGG_METHOD, $env:TIME_RANGE)`n`n$(@($rows).Count) tunnel rows exported; the CSV is attached as an artifact." | Add-Content $env:GITHUB_STEP_SUMMARY
 
       - name: Upload CSV artifact
         uses: actions/upload-artifact@v4
